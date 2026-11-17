@@ -18,18 +18,20 @@ steps:
     args:
       - run
       - deploy
-      - email-bot
+      - alza-ai-assistant
       - --image=${_IMAGE}:${SHORT_SHA}
       - --region=europe-west1
-      - --service-account=email-bot-runtime@${PROJECT_ID}.iam.gserviceaccount.com
+      - --service-account=alza-ai-assistant-runtime@${PROJECT_ID}.iam.gserviceaccount.com
       - --no-allow-unauthenticated
       - --set-env-vars=GCP_PROJECT_ID=${PROJECT_ID},REGION=europe-west1
 
 substitutions:
-  _IMAGE: europe-west1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/email-bot
+  _IMAGE: europe-west1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/alza-ai-assistant
 
 images:
   - ${_IMAGE}:${SHORT_SHA}
 
 options:
   logging: CLOUD_LOGGING_ONLY
+  # The Cloud Run console trigger defines extra substitutions (_SERVICE_NAME, ...) we don't use.
+  substitution_option: ALLOW_LOOSE

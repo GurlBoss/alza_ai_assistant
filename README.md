@@ -42,20 +42,20 @@ Every push to `main` triggers Cloud Build with `cloudbuild.yaml`:
 
 1. `black --check` – an unformatted push stops here and is not deployed,
 2. build the Docker image and push it to
-   `europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/email-bot`,
-3. deploy the `email-bot` Cloud Run service in `europe-west1` as `email-bot-runtime`,
+   `europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/alza-ai-assistant`,
+3. deploy the `alza-ai-assistant` Cloud Run service in `europe-west1` as `alza-ai-assistant-runtime`,
    authentication required.
 
 One-time setup:
 
 * Cloud Build trigger on this repo, branch `^main$`, configuration *Cloud Build configuration file*, path `/cloudbuild.yaml`.
 * The trigger's service account needs **Cloud Run Admin**, **Artifact Registry Writer** and
-  **Service Account User** on `email-bot-runtime`.
+  **Service Account User** on `alza-ai-assistant-runtime`.
 * The Artifact Registry repository `cloud-run-source-deploy` must exist in `europe-west1`.
 
 Check the deployed service (authentication is required):
 
 ```bash
-URL=$(gcloud run services describe email-bot --region europe-west1 --format 'value(status.url)')
+URL=$(gcloud run services describe alza-ai-assistant --region europe-west1 --format 'value(status.url)')
 curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" $URL/health
 ```
