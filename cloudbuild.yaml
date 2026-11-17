@@ -28,7 +28,6 @@ steps:
       - --region=europe-west1
       - --service-account=alza-ai-assistant-runtime@${PROJECT_ID}.iam.gserviceaccount.com
       - --no-allow-unauthenticated
-      - --set-env-vars=GCP_PROJECT_ID=${PROJECT_ID},REGION=europe-west1
 
 substitutions:
   _IMAGE: europe-west1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/alza-ai-assistant

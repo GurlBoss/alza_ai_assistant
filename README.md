@@ -5,11 +5,25 @@ AI email assistant for Gmail: reads incoming emails with PDF, image and audio at
 **Current state:** minimal skeleton for verifying the GCP setup (Cloud Build → Artifact Registry → Cloud Run). Gmail and Gemini logic come later.
 
 ```
-app/main.py      FastAPI app: GET /health, POST /gmail/webhook (Pub/Sub push)
-app/config.py    settings from env vars (GCP_PROJECT_ID, REGION, PUBSUB_TOPIC)
-tests/           pytest tests
-cloudbuild.yaml  black check → docker build → push → deploy to Cloud Run
-token-refresh/   one-time script that gets the Gmail OAuth refresh token
+app/main.py                       FastAPI: /health, /gmail/webhook (Pub/Sub push),
+                                  /internal/gmail/renew-watch, /internal/gmail/recovery-sync
+app/config.py                     settings from env vars (GCP_PROJECT_ID, REGION, GMAIL_*, GEMINI_*, ...)
+
+app/mail_processing/gmail.py      Gmail API: access token, history, messages, send, mark read, watch
+app/mail_processing/sync.py       Gmail history since the stored historyId (gmail_sync/state)
+app/mail_processing/filters.py    own/SENT/SPAM/promotions/auto-reply/bulk mail, 5 replies per thread
+app/mail_processing/processor.py  one email: Firestore claim, reply (fallback if Gemini fails), mark read
+app/mail_processing/reply.py      reply in the original thread (threadId, In-Reply-To, References)
+app/mail_processing/store.py      Firestore state (processed_emails, gmail_sync) + in-memory versions
+
+app/ai_core/llm.py                Gemini on Vertex AI: system instruction, EMAIL block, timeout, one retry
+
+app/utils/auth.py                 OIDC check (audience SERVICE_URL, caller INVOKER_SERVICE_ACCOUNT)
+
+scripts/run_once.py               answers the oldest unread email once, from the terminal
+tests/                            pytest tests (Gmail, Firestore and Gemini mocked)
+cloudbuild.yaml                   black check → tests → docker build → push → deploy to Cloud Run
+token-refresh/                    one-time script that gets the Gmail OAuth refresh token
 ```
 
 ## Run locally
@@ -27,6 +41,22 @@ With Docker:
 ```bash
 docker build -t email-bot .
 docker run --rm -p 8080:8080 --env-file .env email-bot
+```
+
+## End-to-end test
+
+`scripts/run_once.py` answers the oldest unread INBOX email that is not yet in
+Firestore with a Gemini reply in the same thread and marks it as read.
+Set `GEMINI_MODEL` in `.env`; locally Firestore and Vertex AI use your
+Application Default Credentials.
+Fill the Gmail values in `.env` from Secret Manager (values are not printed):
+
+```bash
+for pair in GMAIL_CLIENT_ID:gmail-client-id GMAIL_CLIENT_SECRET:gmail-client-secret \
+            GMAIL_OAUTH_REFRESH_TOKEN:gmail-oauth-refresh-token; do
+  echo "${pair%%:*}=$(gcloud secrets versions access latest --secret=${pair#*:})" >> .env
+done
+.venv/bin/python -m scripts.run_once
 ```
 
 ## Tests and formatting
