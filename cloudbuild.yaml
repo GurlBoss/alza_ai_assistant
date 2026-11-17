@@ -1,0 +1,35 @@
+steps:
+  - id: black-check
+    name: python:3.12-slim
+    entrypoint: sh
+    args: ["-c", "pip install --quiet -r requirements-cloudbuild.txt && black --check --diff ."]
+
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "-t", "${_IMAGE}:${SHORT_SHA}", "."]
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "${_IMAGE}:${SHORT_SHA}"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - email-bot
+      - --image=${_IMAGE}:${SHORT_SHA}
+      - --region=europe-west1
+      - --service-account=email-bot-runtime@${PROJECT_ID}.iam.gserviceaccount.com
+      - --no-allow-unauthenticated
+      - --set-env-vars=GCP_PROJECT_ID=${PROJECT_ID},REGION=europe-west1
+
+substitutions:
+  _IMAGE: europe-west1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/email-bot
+
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
