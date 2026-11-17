@@ -40,7 +40,7 @@ docker run --rm -p 8080:8080 --env-file .env email-bot
 
 Every push to `main` triggers Cloud Build with `cloudbuild.yaml`:
 
-1. `black --check` – an unformatted push stops here and is not deployed,
+1. `black --check` and `pytest` – an unformatted push or a failing test stops here and is not deployed,
 2. build the Docker image and push it to
    `europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/alza-ai-assistant`,
 3. deploy the `alza-ai-assistant` Cloud Run service in `europe-west1` as `alza-ai-assistant-runtime`,

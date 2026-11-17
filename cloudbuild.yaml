@@ -4,6 +4,11 @@ steps:
     entrypoint: sh
     args: ["-c", "pip install --quiet -r requirements-cloudbuild.txt && black --check --diff ."]
 
+  - id: tests
+    name: python:3.12-slim
+    entrypoint: sh
+    args: ["-c", "pip install --quiet -r requirements-cloudbuild.txt && pytest -q"]
+
   - id: build
     name: gcr.io/cloud-builders/docker
     args: ["build", "-t", "${_IMAGE}:${SHORT_SHA}", "."]
