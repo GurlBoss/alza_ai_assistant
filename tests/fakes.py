@@ -8,7 +8,7 @@ from googleapiclient.errors import HttpError
 from app.config import Settings
 from app.mail_processing.gmail import Email, HistoryExpiredError
 from app.mail_processing.store import InMemoryStore, InMemorySyncState
-from app.mail_processing.sync import Mailbox
+from app.mail_processing.processor import Mailbox
 
 BOT = "bot@example.com"
 

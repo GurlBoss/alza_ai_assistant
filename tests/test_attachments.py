@@ -163,6 +163,70 @@ def test_other_formats_are_unsupported(
     ]
 
 
+def test_fake_extension_is_rejected() -> None:
+    """An .exe renamed to .pdf and declared as PDF is still not a PDF."""
+    gmail, email = gmail_with(
+        (ref("a1", "invoice.pdf", "application/pdf", 100), samples.EXE)
+    )
+
+    loaded = load_attachments(gmail, email, SETTINGS)
+
+    assert loaded.accepted == []
+    assert [(r.filename, r.reason) for r in loaded.rejected] == [
+        ("invoice.pdf", UNSUPPORTED)
+    ]
+
+
+def test_oversized_file_is_rejected_without_download() -> None:
+    gmail, email = gmail_with(
+        (ref("a1", "big.pdf", "application/pdf", 11 * MB), samples.PDF)
+    )
+
+    loaded = load_attachments(gmail, email, SETTINGS)
+
+    assert loaded.rejected[0].reason == TOO_LARGE
+    assert gmail.downloaded == []
+
+
+def test_total_size_limit_keeps_attachments_in_order() -> None:
+    """Default limit 18 MB: 8 + 8 fit, the third 8 MB file doesn't, a small one does."""
+    sizes = {"a1": 8 * MB, "a2": 8 * MB, "a3": 8 * MB, "a4": 1 * MB}
+    gmail, email = gmail_with(
+        *[
+            (ref(key, f"{key}.pdf", "application/pdf", size), b"%PDF-" + b"0" * size)
+            for key, size in sizes.items()
+        ]
+    )
+
+    loaded = load_attachments(gmail, email, Settings())
+
+    assert Settings().MAX_TOTAL_ATTACHMENTS_MB == 18
+    assert [a.filename for a in loaded.accepted] == ["a1.pdf", "a2.pdf", "a4.pdf"]
+    assert [(r.filename, r.reason) for r in loaded.rejected] == [
+        ("a3.pdf", TOTAL_TOO_LARGE)
+    ]
+    assert gmail.downloaded == ["a1", "a2", "a4"]  # a3 never downloaded
+
+
+def test_limits_come_from_settings() -> None:
+    gmail, email = gmail_with(
+        (ref("a1", "a.pdf", "application/pdf", 2 * MB), samples.PDF)
+    )
+
+    loaded = load_attachments(gmail, email, Settings(MAX_ATTACHMENT_MB=1))
+
+    assert loaded.rejected[0].reason == TOO_LARGE
+
+
+def test_failed_download_is_rejected() -> None:
+    gmail, email = gmail_with((ref("a1", "a.pdf", "application/pdf", 100), samples.PDF))
+    del gmail.attachment_data["a1"]
+
+    loaded = load_attachments(gmail, email, SETTINGS)
+
+    assert loaded.rejected[0].reason == DOWNLOAD_FAILED
+
+
 # --- signature images ----------------------------------------------------------
 
 

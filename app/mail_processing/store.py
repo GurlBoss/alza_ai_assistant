@@ -41,6 +41,14 @@ def new_record(data: dict[str, Any]) -> dict[str, Any]:
     return {**data, "status": PROCESSING, "updated_at": now()}
 
 
+def completed_record(reply_message_id: str) -> dict[str, Any]:
+    return {
+        "status": COMPLETED,
+        "reply_message_id": reply_message_id,
+        "updated_at": now(),
+    }
+
+
 def failed_record(error_type: str, reply_message_id: str | None) -> dict[str, Any]:
     record: dict[str, Any] = {
         "status": FAILED,
@@ -87,13 +95,7 @@ class FirestoreStore:
         return _create_if_missing(self._client.transaction(), ref, data)
 
     def complete(self, message_id: str, reply_message_id: str) -> None:
-        self._collection.document(message_id).update(
-            {
-                "status": COMPLETED,
-                "reply_message_id": reply_message_id,
-                "updated_at": now(),
-            }
-        )
+        self._collection.document(message_id).update(completed_record(reply_message_id))
 
     def fail(
         self, message_id: str, error_type: str, reply_message_id: str | None = None
@@ -116,11 +118,7 @@ class InMemoryStore:
         return True
 
     def complete(self, message_id: str, reply_message_id: str) -> None:
-        self.docs[message_id].update(
-            status=COMPLETED,
-            reply_message_id=reply_message_id,
-            updated_at=now(),
-        )
+        self.docs[message_id].update(completed_record(reply_message_id))
 
     def fail(
         self, message_id: str, error_type: str, reply_message_id: str | None = None

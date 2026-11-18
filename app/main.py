@@ -9,12 +9,13 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from google.oauth2.credentials import Credentials
 from starlette.concurrency import run_in_threadpool
 
-from app.utils.auth import verify_oidc
+from app.ai_core.llm import make_client
 from app.config import settings
 from app.mail_processing.gmail import GmailClient, get_credentials
-from app.ai_core.llm import make_client
+from app.mail_processing.processor import Mailbox
 from app.mail_processing.store import FirestoreStore, FirestoreSyncState
-from app.mail_processing.sync import Mailbox, SyncResult, sync_mailbox
+from app.mail_processing.sync import SyncResult, sync_mailbox
+from app.utils.auth import verify_oidc
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"

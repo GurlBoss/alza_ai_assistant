@@ -1,16 +1,17 @@
 """Answers one email: claim in the store, Gemini reply in the thread, mark as read."""
 
 import logging
+from dataclasses import dataclass
 from email.utils import parseaddr
 from typing import Any
 
+from app.ai_core.llm import generate_reply
 from app.config import Settings
+from app.knowledge_base.rag import build_rag_tool
 from app.mail_processing.attachments import load_attachments
 from app.mail_processing.gmail import Email, GmailClient
-from app.ai_core.llm import generate_reply
-from app.knowledge_base.rag import build_rag_tool
 from app.mail_processing.reply import send_reply
-from app.mail_processing.store import COMPLETED, FAILED, EmailStore
+from app.mail_processing.store import COMPLETED, FAILED, EmailStore, SyncState
 
 log = logging.getLogger(__name__)
 
@@ -30,24 +31,31 @@ Alza AI Assistant"""
 SKIPPED = "SKIPPED"  # already in the store, nothing done
 
 
+@dataclass
+class Mailbox:
+    """Everything needed to handle the bot's mailbox. Built per request in
+    app.main: a new Gmail client each time, the other clients shared."""
+
+    gmail: GmailClient
+    own_address: str
+    store: EmailStore
+    sync_state: SyncState
+    gemini: Any
+    settings: Settings
+
+
 def sender_domain(sender: str) -> str:
     return parseaddr(sender)[1].rpartition("@")[2].lower()
 
 
-def process_email(
-    email: Email,
-    gmail: GmailClient,
-    store: EmailStore,
-    settings: Settings,
-    own_address: str,
-    gemini: Any,
-) -> str:
+def process_email(mailbox: Mailbox, email: Email) -> str:
     """Returns COMPLETED, FAILED or SKIPPED (already in the store).
 
     Once the email is claimed, errors are recorded as FAILED and not raised, so the
     caller can treat the email as handled. Errors before that (e.g. Firestore
     unavailable) are raised: nothing was recorded and the email must be retried.
     """
+    gmail, store, settings = mailbox.gmail, mailbox.store, mailbox.settings
     claimed = store.claim(
         email.id,
         {
@@ -66,7 +74,7 @@ def process_email(
     try:
         loaded = load_attachments(gmail, email, settings)
         reply_text = generate_reply(
-            gemini,
+            mailbox.gemini,
             settings.GEMINI_MODEL,
             email.subject,
             email.body,
@@ -82,7 +90,7 @@ def process_email(
         reply_text = FALLBACK_REPLY
 
     try:
-        reply_id = send_reply(gmail, email, reply_text, own_address)
+        reply_id = send_reply(gmail, email, reply_text, mailbox.own_address)
     except Exception as exc:
         store.fail(email.id, type(exc).__name__)
         log.error("Message %s FAILED: %s", email.id, type(exc).__name__)

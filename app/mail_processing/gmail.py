@@ -5,8 +5,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from email.utils import parseaddr
-from typing import Any, Iterator
+from typing import Any
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -107,17 +106,6 @@ class GmailClient:
             ids.extend(m["id"] for m in response.get("messages", []))
             request = self.service.users().messages().list_next(request, response)
         return ids[::-1]  # Gmail lists newest first
-
-    def iter_unread(self, own_address: str) -> Iterator[Email]:
-        """Yields unread INBOX messages not sent by own_address, oldest first."""
-        ids = self.list_unread_ids()
-        log.info("Found %d unread message(s) in INBOX", len(ids))
-        for message_id in ids:
-            email = self.get_email(message_id)
-            if parseaddr(email.sender)[1].lower() == own_address.lower():
-                log.info("Skipping message %s sent by the bot itself", message_id)
-                continue
-            yield email
 
     def list_history(self, start_history_id: str) -> tuple[list[str], str]:
         """IDs of messages added to INBOX since start_history_id, and the latest historyId.

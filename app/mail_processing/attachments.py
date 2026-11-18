@@ -9,9 +9,8 @@ from app.mail_processing.gmail import AttachmentRef, Email, GmailClient
 
 log = logging.getLogger(__name__)
 
-IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+# Supported: images (JPEG, PNG, WebP), audio (below), PDF and plain text.
 AUDIO_TYPES = {"audio/mpeg", "audio/mp4", "audio/wav"}
-DOCUMENT_TYPES = {"application/pdf", "text/plain"}
 
 # Larger images are always treated as real pictures (photos, pasted screenshots).
 SIGNATURE_IMAGE_MAX_BYTES = 30 * 1024
@@ -101,35 +100,20 @@ def load_attachments(
     max_file = int(settings.MAX_ATTACHMENT_MB * 1024 * 1024)
     max_total = int(settings.MAX_TOTAL_ATTACHMENTS_MB * 1024 * 1024)
     result = LoadedAttachments()
-    total = 0
 
     for number, ref in enumerate(email.attachments, start=1):
         if is_signature_image(ref, email.referenced_cids):
-            _log(email, number, ref, None, "skipped (signature image)")
+            _log(email, number, ref, "skipped (signature image)")
             continue
-
-        detected = None
-        if ref.size > max_file:
-            reason = TOO_LARGE
-        elif total + ref.size > max_total:
-            reason = TOTAL_TOO_LARGE
+        room = max_total - sum(len(item.data) for item in result.accepted)
+        has_audio = any(item.mime_type in AUDIO_TYPES for item in result.accepted)
+        attachment, reason = _load_one(gmail, email, ref, max_file, room, has_audio)
+        if attachment:
+            result.accepted.append(attachment)
+            _log(email, number, ref, f"accepted as {attachment.mime_type}")
         else:
-            data = _download(gmail, email, ref)
-            if data is None:
-                reason = DOWNLOAD_FAILED
-            else:
-                detected = detect_type(data, ref.mime_type)
-                reason = None if detected else UNSUPPORTED
-                if reason is None and detected in AUDIO_TYPES and _has_audio(result):
-                    reason = EXTRA_AUDIO
-                if reason is None:
-                    total += len(data)
-                    result.accepted.append(Attachment(ref.filename, detected, data))
-                    _log(email, number, ref, detected, "accepted")
-                    continue
-
-        result.rejected.append(RejectedAttachment(ref.filename, reason))
-        _log(email, number, ref, detected, f"rejected ({reason})")
+            result.rejected.append(RejectedAttachment(ref.filename, reason))
+            _log(email, number, ref, f"rejected ({reason})")
 
     log.info(
         "Attachments of %s: %d accepted, %d rejected in %.1f s",
@@ -141,28 +125,39 @@ def load_attachments(
     return result
 
 
-def _has_audio(result: LoadedAttachments) -> bool:
-    return any(item.mime_type in AUDIO_TYPES for item in result.accepted)
-
-
-def _download(gmail: GmailClient, email: Email, ref: AttachmentRef) -> bytes | None:
+def _load_one(
+    gmail: GmailClient,
+    email: Email,
+    ref: AttachmentRef,
+    max_file: int,
+    room: int,
+    has_audio: bool,
+) -> tuple[Attachment | None, str]:
+    """(attachment, "") when usable, otherwise (None, rejection reason)."""
+    if ref.size > max_file:
+        return None, TOO_LARGE
+    if ref.size > room:
+        return None, TOTAL_TOO_LARGE
     try:
-        return gmail.get_attachment(email.id, ref.attachment_id)
+        data = gmail.get_attachment(email.id, ref.attachment_id)
     except Exception as exc:
         log.warning("Attachment download failed: %s", type(exc).__name__)
-        return None
+        return None, DOWNLOAD_FAILED
+    mime_type = detect_type(data, ref.mime_type)
+    if mime_type is None:
+        return None, UNSUPPORTED
+    if mime_type in AUDIO_TYPES and has_audio:
+        return None, EXTRA_AUDIO
+    return Attachment(ref.filename, mime_type, data), ""
 
 
-def _log(
-    email: Email, number: int, ref: AttachmentRef, detected: str | None, outcome: str
-) -> None:
+def _log(email: Email, number: int, ref: AttachmentRef, outcome: str) -> None:
     # Type and size only: no file names or contents.
     log.info(
-        "Attachment %d of %s: declared=%s detected=%s size=%d -> %s",
+        "Attachment %d of %s: declared=%s size=%d -> %s",
         number,
         email.id,
         ref.mime_type or "-",
-        detected or "-",
         ref.size,
         outcome,
     )

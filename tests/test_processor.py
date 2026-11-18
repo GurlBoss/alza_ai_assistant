@@ -8,8 +8,18 @@ import pytest
 from app.ai_core import llm
 from app.config import Settings
 from app.mail_processing.gmail import Email, GmailClient
-from app.mail_processing.processor import FALLBACK_REPLY, SKIPPED, process_email
-from app.mail_processing.store import COMPLETED, FAILED, InMemoryStore
+from app.mail_processing.processor import (
+    FALLBACK_REPLY,
+    SKIPPED,
+    Mailbox,
+    process_email,
+)
+from app.mail_processing.store import (
+    COMPLETED,
+    FAILED,
+    InMemoryStore,
+    InMemorySyncState,
+)
 
 BOT = "bot@example.com"
 SETTINGS = Settings(GEMINI_MODEL="gemini-test")
@@ -46,6 +56,11 @@ def make_gemini(answer: str = "Gemini answer") -> MagicMock:
     return client
 
 
+def run(gmail: GmailClient, store: InMemoryStore, gemini: MagicMock) -> str:
+    mailbox = Mailbox(gmail, BOT, store, InMemorySyncState(), gemini, SETTINGS)
+    return process_email(mailbox, make_email())
+
+
 def sent_text(service: MagicMock) -> str:
     raw = service.users().messages().send.call_args.kwargs["body"]["raw"]
     message = message_from_bytes(base64.urlsafe_b64decode(raw), policy=policy.default)
@@ -57,7 +72,7 @@ def test_new_email_is_answered_by_gemini() -> None:
     gemini = make_gemini()
     store = InMemoryStore()
 
-    result = process_email(make_email(), gmail, store, SETTINGS, BOT, gemini)
+    result = run(gmail, store, gemini)
 
     assert result == COMPLETED
     assert sent_text(service).strip() == "Gemini answer"
@@ -76,11 +91,11 @@ def test_duplicate_email_is_skipped() -> None:
     gmail, service = make_gmail()
     gemini = make_gemini()
     store = InMemoryStore()
-    process_email(make_email(), gmail, store, SETTINGS, BOT, gemini)
+    run(gmail, store, gemini)
     service.reset_mock()
     gemini.reset_mock()
 
-    assert process_email(make_email(), gmail, store, SETTINGS, BOT, gemini) == SKIPPED
+    assert run(gmail, store, gemini) == SKIPPED
 
     gemini.models.generate_content.assert_not_called()
     service.users().messages().send.assert_not_called()
@@ -93,7 +108,7 @@ def test_gemini_failure_sends_fallback_and_sets_failed() -> None:
     gemini.models.generate_content.side_effect = TimeoutError("prompt text")
     store = InMemoryStore()
 
-    result = process_email(make_email(), gmail, store, SETTINGS, BOT, gemini)
+    result = run(gmail, store, gemini)
 
     assert result == FAILED
     assert gemini.models.generate_content.call_count == 2  # one retry
@@ -114,7 +129,7 @@ def test_send_failure_sets_failed() -> None:
     store = InMemoryStore()
 
     # Recorded as FAILED and not raised, so the caller can move on.
-    result = process_email(make_email(), gmail, store, SETTINGS, BOT, make_gemini())
+    result = run(gmail, store, make_gemini())
 
     assert result == FAILED
 
@@ -131,7 +146,7 @@ def test_mark_read_failure_keeps_completed() -> None:
     service.users().messages().modify().execute.side_effect = ConnectionError()
     store = InMemoryStore()
 
-    result = process_email(make_email(), gmail, store, SETTINGS, BOT, make_gemini())
+    result = run(gmail, store, make_gemini())
 
     assert result == COMPLETED
     assert store.docs["msg-1"]["status"] == COMPLETED
