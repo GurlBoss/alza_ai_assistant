@@ -70,6 +70,7 @@ class GmailClient:
 
     @classmethod
     def from_credentials(cls, creds: Credentials) -> "GmailClient":
+        """Not thread-safe (one shared httplib2 connection): use one per request."""
         return cls(build("gmail", "v1", credentials=creds, cache_discovery=False))
 
     def get_address(self) -> str:

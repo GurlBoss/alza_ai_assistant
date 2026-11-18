@@ -8,6 +8,8 @@ expiration offset, so no extra expiry field is stored.
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from google.cloud import firestore
+
 COLLECTION = "processed_emails"
 
 PROCESSING = "PROCESSING"
@@ -50,25 +52,39 @@ def failed_record(error_type: str, reply_message_id: str | None) -> dict[str, An
     return record
 
 
+@firestore.transactional
+def _create_if_missing(
+    transaction: firestore.Transaction,
+    ref: firestore.DocumentReference,
+    data: dict[str, Any],
+) -> bool:
+    if ref.get(transaction=transaction).exists:
+        return False
+    transaction.create(ref, new_record(data))
+    return True
+
+
+@firestore.transactional
+def _save_if_newer(
+    transaction: firestore.Transaction,
+    ref: firestore.DocumentReference,
+    history_id: str,
+) -> None:
+    # Concurrent notifications can finish out of order; never move backwards.
+    snapshot = ref.get(transaction=transaction)
+    stored = snapshot.get("history_id") if snapshot.exists else None
+    if stored is None or int(history_id) > int(stored):
+        transaction.set(ref, {"history_id": history_id, "updated_at": now()})
+
+
 class FirestoreStore:
     def __init__(self, project_id: str) -> None:
-        from google.cloud import firestore
-
-        self._firestore = firestore
         self._client = firestore.Client(project=project_id)
         self._collection = self._client.collection(COLLECTION)
 
     def claim(self, message_id: str, data: dict[str, Any]) -> bool:
         ref = self._collection.document(message_id)
-
-        @self._firestore.transactional
-        def create_if_missing(transaction) -> bool:
-            if ref.get(transaction=transaction).exists:
-                return False
-            transaction.create(ref, new_record(data))
-            return True
-
-        return create_if_missing(self._client.transaction())
+        return _create_if_missing(self._client.transaction(), ref, data)
 
     def complete(self, message_id: str, reply_message_id: str) -> None:
         self._collection.document(message_id).update(
@@ -128,9 +144,6 @@ class FirestoreSyncState:
     """gmail_sync/state document: {history_id, updated_at}."""
 
     def __init__(self, project_id: str) -> None:
-        from google.cloud import firestore
-
-        self._firestore = firestore
         self._client = firestore.Client(project=project_id)
         self._ref = self._client.collection(SYNC_COLLECTION).document(SYNC_DOCUMENT)
 
@@ -139,17 +152,7 @@ class FirestoreSyncState:
         return snapshot.get("history_id") if snapshot.exists else None
 
     def save_history_id(self, history_id: str) -> None:
-        ref = self._ref
-
-        # Concurrent notifications can finish out of order; never move backwards.
-        @self._firestore.transactional
-        def save_if_newer(transaction) -> None:
-            snapshot = ref.get(transaction=transaction)
-            stored = snapshot.get("history_id") if snapshot.exists else None
-            if stored is None or int(history_id) > int(stored):
-                transaction.set(ref, {"history_id": history_id, "updated_at": now()})
-
-        save_if_newer(self._client.transaction())
+        _save_if_newer(self._client.transaction(), self._ref, history_id)
 
 
 class InMemorySyncState:

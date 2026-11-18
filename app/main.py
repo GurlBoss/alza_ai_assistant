@@ -2,9 +2,11 @@ import base64
 import binascii
 import json
 import logging
+from dataclasses import replace
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from google.oauth2.credentials import Credentials
 from starlette.concurrency import run_in_threadpool
 
 from app.utils.auth import verify_oidc
@@ -22,10 +24,16 @@ log = logging.getLogger(__name__)
 app = FastAPI(title="alza-ai-assistant")
 
 
+# Built on first use, so /health works even before the secrets are set.
 @lru_cache(maxsize=1)
-def get_mailbox() -> Mailbox:
-    """Built on first use, so /health works even before the secrets are set."""
-    gmail = GmailClient.from_credentials(get_credentials(settings))
+def gmail_credentials() -> Credentials:
+    return get_credentials(settings)
+
+
+@lru_cache(maxsize=1)
+def shared_mailbox() -> Mailbox:
+    """Clients that are safe to share between concurrent requests."""
+    gmail = GmailClient.from_credentials(gmail_credentials())
     own_address = gmail.get_address()
     log.info("Mailbox %s ready", own_address)
     return Mailbox(
@@ -35,6 +43,14 @@ def get_mailbox() -> Mailbox:
         sync_state=FirestoreSyncState(settings.GCP_PROJECT_ID),
         gemini=make_client(settings),
         settings=settings,
+    )
+
+
+def get_mailbox() -> Mailbox:
+    """Per request: a new Gmail client, because its HTTP connection is not
+    thread-safe. Everything else is shared."""
+    return replace(
+        shared_mailbox(), gmail=GmailClient.from_credentials(gmail_credentials())
     )
 
 

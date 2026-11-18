@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.utils import auth
 from app.utils.auth import verify_oidc
+from app import main
 from app.main import app, decode_notification, get_mailbox
 from app.mail_processing.store import COMPLETED
 from tests.fakes import BOT, FakeGmail, make_email, make_mailbox
@@ -41,6 +42,22 @@ def test_health() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_each_request_gets_its_own_gmail_client(monkeypatch) -> None:
+    """The Gmail client's HTTP connection is not thread-safe."""
+    shared = make_mailbox(FakeGmail([]))
+    monkeypatch.setattr(main, "shared_mailbox", lambda: shared)
+    monkeypatch.setattr(main, "gmail_credentials", lambda: "creds")
+    monkeypatch.setattr(
+        main.GmailClient, "from_credentials", lambda creds: FakeGmail([])
+    )
+
+    first, second = get_mailbox(), get_mailbox()
+
+    assert first.gmail is not second.gmail
+    assert first.store is second.store is shared.store
+    assert first.gemini is second.gemini
 
 
 def test_decode_notification() -> None:

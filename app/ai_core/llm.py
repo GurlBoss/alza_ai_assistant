@@ -54,14 +54,16 @@ def make_client(settings: Settings) -> genai.Client:
     )
 
 
-def build_prompt(subject: str, body: str) -> str:
-    # Remove the markers from the email, so it cannot close the block early.
-    def clean(text: str) -> str:
-        return text.replace(EMAIL_START, "").replace(EMAIL_END, "").strip()
+def strip_markers(text: str) -> str:
+    """Removes the EMAIL markers, so the email cannot close the block early."""
+    return text.replace(EMAIL_START, "").replace(EMAIL_END, "").strip()
 
+
+def build_prompt(subject: str, body: str) -> str:
     return (
         "Write a reply to the customer email below.\n\n"
-        f"{EMAIL_START}\nSubject: {clean(subject)}\n\n{clean(body)}\n{EMAIL_END}"
+        f"{EMAIL_START}\nSubject: {strip_markers(subject)}\n\n"
+        f"{strip_markers(body)}\n{EMAIL_END}"
     )
 
 
