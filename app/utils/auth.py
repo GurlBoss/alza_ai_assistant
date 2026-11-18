@@ -17,8 +17,9 @@ def verify_oidc(request: Request) -> dict:
     """FastAPI dependency: the request must carry a Google-signed ID token
     for this service, issued to INVOKER_SERVICE_ACCOUNT when that is set.
 
-    Accepted audiences: SERVICE_URL, or SERVICE_URL + the called path. The latter
-    is what Pub/Sub and Cloud Scheduler send when no audience is configured.
+    Accepted audiences: each URL in SERVICE_URL (comma-separated, a Cloud Run
+    service has two URLs), with or without the called path. The path form is
+    what Pub/Sub and Cloud Scheduler send when no audience is configured.
     """
     if not settings.SERVICE_URL:
         log.error("SERVICE_URL is not set, rejecting the request")
@@ -27,8 +28,8 @@ def verify_oidc(request: Request) -> dict:
     authorization = request.headers.get("authorization", "")
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
-    service_url = settings.SERVICE_URL.rstrip("/")
-    audiences = [service_url, service_url + request.url.path]
+    urls = [url.strip().rstrip("/") for url in settings.SERVICE_URL.split(",")]
+    audiences = [a for url in urls if url for a in (url, url + request.url.path)]
     try:
         claims = id_token.verify_oauth2_token(
             authorization[len("bearer ") :], _transport, audience=audiences

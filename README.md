@@ -17,11 +17,15 @@ app/mail_processing/reply.py      reply in the original thread (threadId, In-Rep
 app/mail_processing/attachments.py  download, content-based type check, size and audio limits, signature images
 app/mail_processing/store.py      Firestore state (processed_emails, gmail_sync) + in-memory versions
 
+app/knowledge_base/rag.py         RAG entry point: retrieve for an email, index/delete a file, full reindex
+app/knowledge_base/*.py           loader (GCS docs/), chunking, embeddings, vector_store, chunk_store (kb_chunks)
+
 app/ai_core/llm.py                Gemini on Vertex AI: system instruction, EMAIL block, attachments as inline parts, retry
 
 app/utils/auth.py                 OIDC check (audience SERVICE_URL, caller INVOKER_SERVICE_ACCOUNT)
 
 scripts/run_once.py               answers the oldest unread email once, from the terminal
+scripts/index_docs.py             full (re)index of gs://KB_BUCKET/docs/ (--force to ignore hashes)
 tests/                            pytest tests (Gmail, Firestore and Gemini mocked)
 cloudbuild.yaml                   black check → tests → docker build → push → deploy to Cloud Run
 token-refresh/                    one-time script that gets the Gmail OAuth refresh token

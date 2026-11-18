@@ -9,6 +9,7 @@ from google import genai
 from google.genai import errors, types
 
 from app.config import Settings
+from app.knowledge_base.rag import Snippet
 from app.mail_processing.attachments import Attachment, RejectedAttachment
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,14 @@ You answer customer emails.
 
 Rules:
 - Reply in the same language as the customer's email.
+- The KNOWLEDGE block contains excerpts from Alza's own documents, each with
+  its source. Answer questions about Alza's products, services and policies
+  only from KNOWLEDGE; never guess or use general knowledge for them.
+- If KNOWLEDGE does not contain the answer, say that you don't have this
+  information and offer to pass the email to a colleague.
+- When you used KNOWLEDGE, end the reply with one last line, after the
+  signature, naming the source document(s), e.g. "Source: shipping.md"
+  (translated into the reply's language).
 - Be short, polite and professional. Plain text only, no Markdown.
 - Never promise refunds, discounts, compensation or delivery dates.
 - If you don't know the answer or lack the information, say so honestly
@@ -43,7 +52,9 @@ Rules:
 EMAIL_START = "=== EMAIL START ==="
 EMAIL_END = "=== EMAIL END ==="
 # Anything that looks like one of our block markers, e.g. "=== ATTACHMENT 2 END ===".
-MARKER_PATTERN = re.compile(r"===\s*(?:EMAIL|ATTACHMENT)\b[^=\n]*===", re.IGNORECASE)
+MARKER_PATTERN = re.compile(
+    r"===\s*(?:EMAIL|ATTACHMENT|KNOWLEDGE)\b[^=\n]*===", re.IGNORECASE
+)
 TEXT_ATTACHMENT_MAX_CHARS = 50_000
 
 URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
@@ -74,6 +85,7 @@ def build_prompt(
     body: str,
     attachments: Sequence[Attachment] = (),
     not_processed: Sequence[RejectedAttachment] = (),
+    knowledge: Sequence[Snippet] = (),
 ) -> str:
     """The text part of the request. Text attachments are included here; other
     attachments are listed and sent as separate file parts, in the same order."""
@@ -99,6 +111,7 @@ def build_prompt(
 
     parts = [
         "Write a reply to the customer email below.",
+        _knowledge_block(knowledge),
         f"{EMAIL_START}\n" + "\n".join(lines) + f"\n{EMAIL_END}",
         *text_blocks,
     ]
@@ -108,6 +121,15 @@ def build_prompt(
             "Add one polite sentence to the reply naming them."
         )
     return "\n\n".join(parts)
+
+
+def _knowledge_block(snippets: Sequence[Snippet]) -> str:
+    entries = [
+        f"[{number}] Source: {snippet.source}\n{strip_markers(snippet.text)}"
+        for number, snippet in enumerate(snippets, start=1)
+    ]
+    content = "\n\n".join(entries) or "(no relevant documents found)"
+    return f"=== KNOWLEDGE START ===\n{content}\n=== KNOWLEDGE END ==="
 
 
 def _text_block(number: int, data: bytes) -> str:
@@ -143,6 +165,7 @@ def generate_reply(
     body: str,
     attachments: Sequence[Attachment] = (),
     not_processed: Sequence[RejectedAttachment] = (),
+    knowledge: Sequence[Snippet] = (),
 ) -> str:
     """Returns Gemini's reply. Raises the last error when both attempts fail.
 
@@ -150,7 +173,7 @@ def generate_reply(
     the other attachments as inline file parts.
     """
     config = types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-    prompt = build_prompt(subject, body, attachments, not_processed)
+    prompt = build_prompt(subject, body, attachments, not_processed, knowledge)
     contents = [types.Part.from_text(text=prompt)] + [
         types.Part.from_bytes(data=item.data, mime_type=item.mime_type)
         for item in attachments

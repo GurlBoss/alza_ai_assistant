@@ -6,6 +6,7 @@ from typing import Any
 
 from app.config import Settings
 from app.mail_processing.attachments import load_attachments
+from app.knowledge_base.rag import KnowledgeBase
 from app.mail_processing.gmail import Email, GmailClient
 from app.ai_core.llm import generate_reply
 from app.mail_processing.reply import send_reply
@@ -40,6 +41,7 @@ def process_email(
     settings: Settings,
     own_address: str,
     gemini: Any,
+    knowledge: KnowledgeBase | None = None,
 ) -> str:
     """Returns COMPLETED, FAILED or SKIPPED (already in the store).
 
@@ -64,6 +66,8 @@ def process_email(
     gemini_error = None
     try:
         loaded = load_attachments(gmail, email, settings)
+        # retrieve() never raises; without a knowledge base the list is empty.
+        snippets = knowledge.retrieve(email.subject, email.body) if knowledge else []
         reply_text = generate_reply(
             gemini,
             settings.GEMINI_MODEL,
@@ -71,6 +75,7 @@ def process_email(
             email.body,
             loaded.accepted,
             loaded.rejected,
+            snippets,
         )
     except Exception as exc:
         # Only the exception type: messages can contain email content or tokens.
