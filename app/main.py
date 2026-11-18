@@ -12,10 +12,9 @@ from starlette.concurrency import run_in_threadpool
 from app.ai_core.llm import make_client
 from app.config import settings
 from app.mail_processing.gmail import GmailClient, get_credentials
-from app.mail_processing.processor import Mailbox
-from app.mail_processing.store import FirestoreStore, FirestoreSyncState
-from app.mail_processing.sync import SyncResult, sync_mailbox
+from app.mail_processing.mailbox import Mailbox
 from app.utils.auth import verify_oidc
+from app.utils.firestore_storage import FirestoreStorage
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -25,9 +24,10 @@ log = logging.getLogger(__name__)
 app = FastAPI(title="alza-ai-assistant")
 
 
-# Built on first use, so /health works even before the secrets are set.
 @lru_cache(maxsize=1)
 def gmail_credentials() -> Credentials:
+    """Gmail OAuth credentials, created on first use and cached, so /health works before
+    any Gmail call."""
     return get_credentials(settings)
 
 
@@ -40,8 +40,7 @@ def shared_mailbox() -> Mailbox:
     return Mailbox(
         gmail=gmail,
         own_address=own_address,
-        store=FirestoreStore(settings.GCP_PROJECT_ID),
-        sync_state=FirestoreSyncState(settings.GCP_PROJECT_ID),
+        storage=FirestoreStorage(settings.GCP_PROJECT_ID),
         gemini=make_client(settings),
         settings=settings,
     )
@@ -66,15 +65,18 @@ def decode_notification(body: dict) -> tuple[str, str]:
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    """Liveness check; needs no authentication or configuration of external services."""
     return {"status": "ok"}
 
 
-# Pub/Sub acks on 2xx and redelivers otherwise. An error escaping sync_mailbox
+# Pub/Sub acks on 2xx and redelivers otherwise. An error escaping check_inbox
 # becomes a 500, so the notification is retried; handled messages are skipped.
 @app.post("/gmail/webhook", status_code=204, dependencies=[Depends(verify_oidc)])
 async def gmail_webhook(
     request: Request, mailbox: Mailbox = Depends(get_mailbox)
 ) -> Response:
+    """Pub/Sub push endpoint for Gmail notifications: answers every new INBOX email.
+    Returns 204 when all are handled; any other status makes Pub/Sub redeliver."""
     try:
         body = await request.json()
     except ValueError as exc:
@@ -88,18 +90,19 @@ async def gmail_webhook(
         log.warning("Notification for another mailbox, ignoring")
         return Response(status_code=204)
 
-    result = await run_sync(mailbox, history_id)
-    log.info("Sync done: %s", result.results)
+    # The Google clients block, so the work runs in a worker thread.
+    result = await run_in_threadpool(mailbox.check_inbox, history_id)
+    log.info("Inbox processed: %s", result.results)
     return Response(status_code=204)
 
 
 @app.post("/internal/gmail/renew-watch", dependencies=[Depends(verify_oidc)])
 def renew_watch(mailbox: Mailbox = Depends(get_mailbox)) -> dict[str, str]:
-    if not settings.PUBSUB_TOPIC:
-        raise HTTPException(status_code=503, detail="PUBSUB_TOPIC is not set")
+    """Starts or renews the Gmail watch (it expires after 7 days); called daily by Cloud
+    Scheduler."""
     response = mailbox.gmail.watch(settings.PUBSUB_TOPIC)
-    if mailbox.sync_state.get_history_id() is None:
-        mailbox.sync_state.save_history_id(response["historyId"])
+    if mailbox.storage.get_history_id() is None:
+        mailbox.storage.save_history_id(response["historyId"])
     log.info(
         "Gmail watch renewed: historyId=%s expiration=%s",
         response["historyId"],
@@ -108,16 +111,13 @@ def renew_watch(mailbox: Mailbox = Depends(get_mailbox)) -> dict[str, str]:
     return {"historyId": response["historyId"], "expiration": response["expiration"]}
 
 
-@app.post("/internal/gmail/recovery-sync", dependencies=[Depends(verify_oidc)])
-async def recovery_sync(mailbox: Mailbox = Depends(get_mailbox)) -> dict:
-    result = await run_sync(mailbox, None)
+@app.post("/internal/gmail/recovery-check-inbox", dependencies=[Depends(verify_oidc)])
+async def recovery_check_inbox(mailbox: Mailbox = Depends(get_mailbox)) -> dict:
+    """Recovery: checks all unread INBOX mail instead of the history since the
+    stored history ID, e.g. after lost notifications."""
+    result = await run_in_threadpool(mailbox.check_inbox, recovery=True)
     return {
         "startHistoryId": result.start_history_id,
         "savedHistoryId": result.saved_history_id,
         "results": result.results,
     }
-
-
-async def run_sync(mailbox: Mailbox, history_id: str | None) -> SyncResult:
-    # Gmail, Firestore and Gemini clients are blocking; keep the event loop free.
-    return await run_in_threadpool(sync_mailbox, mailbox, history_id)

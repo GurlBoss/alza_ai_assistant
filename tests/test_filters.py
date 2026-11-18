@@ -1,5 +1,3 @@
-import pytest
-
 from app.mail_processing.filters import (
     MAX_BOT_REPLIES_PER_THREAD,
     skip_reason,
@@ -8,13 +6,11 @@ from app.mail_processing.filters import (
 from tests.fakes import BOT, FakeGmail, make_email
 
 
-def test_normal_email_passes() -> None:
-    assert skip_reason(make_email(), BOT) is None
-
-
-@pytest.mark.parametrize(
-    ("overrides", "reason"),
-    [
+def test_skip_reasons() -> None:
+    """Each case changes one detail of a normal customer email."""
+    cases = [
+        ({}, None),  # a normal customer email is answered
+        ({"headers": {"auto-submitted": "no"}}, None),  # "no" means written by a human
         ({"sender": f"Alza Bot <{BOT.upper()}>"}, "own message"),
         ({"sender": "Shop <no-reply@shop.example>"}, "no-reply sender"),
         ({"sender": "MAILER-DAEMON@example.com"}, "no-reply sender"),
@@ -30,14 +26,9 @@ def test_normal_email_passes() -> None:
         ({"headers": {"precedence": "Bulk"}}, "bulk precedence"),
         ({"headers": {"list-unsubscribe": "<mailto:u@x>"}}, "mailing list"),
         ({"headers": {"return-path": "<>"}}, "bounce"),
-    ],
-)
-def test_skip_reasons(overrides: dict, reason: str) -> None:
-    assert skip_reason(make_email(**overrides), BOT) == reason
-
-
-def test_auto_submitted_no_is_allowed() -> None:
-    assert skip_reason(make_email(headers={"auto-submitted": "no"}), BOT) is None
+    ]
+    for overrides, reason in cases:
+        assert skip_reason(make_email(**overrides), BOT) == reason, overrides
 
 
 def test_thread_reply_limit() -> None:

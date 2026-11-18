@@ -14,10 +14,8 @@ from app.config import Settings
 log = logging.getLogger(__name__)
 
 
-def build_rag_tool(settings: Settings) -> genai_types.Tool | None:
-    """The retrieval tool for RAG_CORPUS, or None when no corpus is configured."""
-    if not settings.RAG_CORPUS:
-        return None
+def build_rag_tool(settings: Settings) -> genai_types.Tool:
+    """The retrieval tool for RAG_CORPUS, sent with every Gemini call."""
     return genai_types.Tool(
         retrieval=genai_types.Retrieval(
             vertex_rag_store=genai_types.VertexRagStore(

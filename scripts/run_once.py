@@ -10,44 +10,38 @@ import logging
 from app.ai_core.llm import make_client
 from app.config import Settings
 from app.mail_processing.gmail import GmailClient, get_credentials
-from app.mail_processing.processor import Mailbox
-from app.mail_processing.store import (
-    COMPLETED,
-    FAILED,
-    FirestoreStore,
-    FirestoreSyncState,
-)
-from app.mail_processing.sync import handle_message
+from app.mail_processing.mailbox import Mailbox
+from app.utils.firestore_storage import COMPLETED, FAILED, FirestoreStorage
 
 log = logging.getLogger("run_once")
 
 
-def main() -> None:
+def main(recovery: bool = False) -> None:
+    """Builds the mailbox from .env and answers the oldest unread email that passes the
+    filters. With recovery, an email that FAILED without any reply is retried."""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     settings = Settings()
-    if not settings.GCP_PROJECT_ID:
-        raise SystemExit("Set GCP_PROJECT_ID in .env")
 
     gmail = GmailClient.from_credentials(get_credentials(settings))
     mailbox = Mailbox(
         gmail=gmail,
         own_address=gmail.get_address(),
-        store=FirestoreStore(settings.GCP_PROJECT_ID),
-        sync_state=FirestoreSyncState(settings.GCP_PROJECT_ID),
+        storage=FirestoreStorage(settings.GCP_PROJECT_ID),
         gemini=make_client(settings),
         settings=settings,
     )
     log.info(
-        "Mailbox %s, Gemini %s (%s)",
+        "Mailbox %s, Gemini %s (%s), recovery %s",
         mailbox.own_address,
         settings.GEMINI_MODEL,
         settings.GEMINI_REGION,
+        "on" if recovery else "off",
     )
 
     for message_id in gmail.list_unread_ids():
-        result = handle_message(mailbox, message_id)
+        result = mailbox.handle_message(message_id, recovery)
         log.info("Message %s: %s", message_id, result)
         if result in (COMPLETED, FAILED):
             return

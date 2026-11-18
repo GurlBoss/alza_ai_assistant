@@ -1,14 +1,22 @@
-"""In-memory Gmail and Gemini doubles shared by the sync and webhook tests."""
+"""In-memory Gmail, Gemini and Firestore doubles shared by the mailbox and webhook
+tests."""
 
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 from googleapiclient.errors import HttpError
 
 from app.config import Settings
 from app.mail_processing.gmail import Email, HistoryExpiredError
-from app.mail_processing.store import InMemoryStore, InMemorySyncState
-from app.mail_processing.processor import Mailbox
+from app.utils.firestore_storage import (
+    can_retry,
+    completed_record,
+    failed_record,
+    new_record,
+    skipped_record,
+)
+from app.mail_processing.mailbox import Mailbox
 
 BOT = "bot@example.com"
 
@@ -92,6 +100,48 @@ class FakeGmail:
         return {"historyId": self.history_id, "expiration": "1795000000000"}
 
 
+class InMemoryStorage:
+    """Same behaviour as FirestoreStorage, in memory, for tests."""
+
+    def __init__(self, history_id: str | None = None) -> None:
+        self.docs: dict[str, dict[str, Any]] = {}
+        self.history_id = history_id
+
+    def create_and_claim_message(
+        self, message_id: str, data: dict[str, Any], retry_failed: bool = False
+    ) -> bool:
+        """Claims the email for processing; False if it is already stored, unless
+        retry_failed and the stored record can_retry."""
+        existing = self.docs.get(message_id)
+        claimed = existing is None or (retry_failed and can_retry(existing))
+        if claimed:
+            self.docs[message_id] = new_record(data)
+        return claimed
+
+    def complete_message(self, message_id: str, reply_message_id: str) -> None:
+        """Marks the email as answered."""
+        self.docs[message_id].update(completed_record(reply_message_id))
+
+    def fail_message(
+        self, message_id: str, error_type: str, reply_message_id: str | None = None
+    ) -> None:
+        """Marks the email as failed, with only the error type."""
+        self.docs[message_id].update(failed_record(error_type, reply_message_id))
+
+    def skip_message(self, message_id: str, data: dict[str, Any], reason: str) -> None:
+        """Records an email the filters rejected, unless it already has a record."""
+        self.docs.setdefault(message_id, skipped_record(data, reason))
+
+    def get_history_id(self) -> str | None:
+        """The stored history ID, or None before the first inbox check."""
+        return self.history_id
+
+    def save_history_id(self, history_id: str) -> None:
+        """Stores the historyId unless a newer one is already stored."""
+        if self.history_id is None or int(history_id) > int(self.history_id):
+            self.history_id = history_id
+
+
 def make_gemini(answer: str = "Gemini answer") -> MagicMock:
     client = MagicMock()
     client.models.generate_content.return_value = MagicMock(text=answer)
@@ -102,8 +152,7 @@ def make_mailbox(gmail: FakeGmail, history_id: str | None = "100") -> Mailbox:
     return Mailbox(
         gmail=gmail,
         own_address=BOT,
-        store=InMemoryStore(),
-        sync_state=InMemorySyncState(history_id),
+        storage=InMemoryStorage(history_id),
         gemini=make_gemini(),
         settings=Settings(GEMINI_MODEL="gemini-test"),
     )

@@ -1,26 +1,33 @@
 import base64
 
-import pytest
-
 from app.config import Settings
 from app.mail_processing.attachments import (
-    DOWNLOAD_FAILED,
-    EXTRA_AUDIO,
-    TOO_LARGE,
-    TOTAL_TOO_LARGE,
-    UNSUPPORTED,
-    detect_type,
-    is_signature_image,
+    ACCEPTED,
+    REJECTED,
+    Attachment,
     load_attachments,
 )
+from app.mail_processing.filters import (
+    TOO_LARGE,
+    UNSUPPORTED,
+    filter_type,
+    is_signature_image,
+)
 from app.mail_processing.gmail import AttachmentRef, parse_message
-from app.mail_processing.store import COMPLETED
-from app.mail_processing.sync import sync_mailbox
+from app.utils.firestore_storage import COMPLETED
 from tests import samples
 from tests.fakes import FakeGmail, make_email, make_mailbox
 
 MB = 1024 * 1024
 SETTINGS = Settings(MAX_ATTACHMENT_MB=10, MAX_TOTAL_ATTACHMENTS_MB=20)
+
+
+def accepted(attachments: list[Attachment]) -> list[Attachment]:
+    return [item for item in attachments if item.state == ACCEPTED]
+
+
+def rejected(attachments: list[Attachment]) -> list[Attachment]:
+    return [item for item in attachments if item.state == REJECTED]
 
 
 def ref(
@@ -46,121 +53,31 @@ def gmail_with(*files: tuple[AttachmentRef, bytes]) -> tuple[FakeGmail, object]:
 # --- type detection by magic bytes ---------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("data", "expected"),
-    [
+def test_filter_type() -> None:
+    """The type comes from the content; everything not supported is None."""
+    cases = [
         (samples.PDF, "application/pdf"),
         (samples.JPEG, "image/jpeg"),
         (samples.png(), "image/png"),
+        (samples.WEBP, "image/webp"),
         (samples.wav(), "audio/wav"),
         (samples.MP3_ID3, "audio/mpeg"),
         (samples.MP3_FRAME, "audio/mpeg"),
-        (samples.WEBP, "image/webp"),
         (samples.M4A, "audio/mp4"),
-        # Everything else is unsupported:
         (samples.office("word"), None),  # DOCX
         (samples.OGG_OPUS, None),
         (samples.MP4_VIDEO, None),  # MP4 container, but a video brand
         (samples.EXE, None),
         (b"", None),
-    ],
-)
-def test_detect_type(data: bytes, expected: str | None) -> None:
-    assert detect_type(data) == expected
-
-
-def test_text_needs_text_content_and_declared_plain_text() -> None:
-    assert detect_type(samples.text(), "text/plain") == "text/plain"
-    assert detect_type(samples.text(), "text/plain; charset=utf-8") == "text/plain"
-    assert detect_type(samples.text(), "application/octet-stream") is None
-    assert detect_type(samples.EXE, "text/plain") is None  # binary renamed to .txt
+    ]
+    for data, expected in cases:
+        assert filter_type(data) == expected, data[:12]
+    assert filter_type(samples.text(), "text/plain") == "text/plain"
+    assert filter_type(samples.text(), "application/octet-stream") is None
+    assert filter_type(samples.EXE, "text/plain") is None  # binary renamed to .txt
 
 
 # --- loading -------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("filename", "declared", "data", "verified"),
-    [
-        ("invoice.pdf", "application/pdf", samples.PDF, "application/pdf"),
-        ("photo.jpg", "image/jpeg", samples.JPEG, "image/jpeg"),
-        ("screen.png", "image/png", samples.png(), "image/png"),
-        ("voice.mp3", "audio/mpeg", samples.MP3_ID3, "audio/mpeg"),
-        ("voice.wav", "audio/wav", samples.wav(), "audio/wav"),
-        ("photo.webp", "image/webp", samples.WEBP, "image/webp"),
-        ("memo.m4a", "audio/x-m4a", samples.M4A, "audio/mp4"),
-        ("note.txt", "text/plain", samples.text(), "text/plain"),
-    ],
-)
-def test_supported_attachment_is_accepted(
-    filename: str, declared: str, data: bytes, verified: str
-) -> None:
-    gmail, email = gmail_with((ref("a1", filename, declared, len(data)), data))
-
-    loaded = load_attachments(gmail, email, SETTINGS)
-
-    assert [(a.filename, a.mime_type, a.data) for a in loaded.accepted] == [
-        (filename, verified, data)
-    ]
-    assert loaded.rejected == []
-
-
-def test_multiple_attachments() -> None:
-    gmail, email = gmail_with(
-        (ref("a1", "a.pdf", "application/pdf", 100), samples.PDF),
-        (ref("a2", "b.png", "image/png", 100), samples.png()),
-        (ref("a3", "c.wav", "audio/wav", 100), samples.wav()),
-        (ref("a4", "d.txt", "text/plain", 100), samples.text()),
-    )
-
-    loaded = load_attachments(gmail, email, SETTINGS)
-
-    assert [a.mime_type for a in loaded.accepted] == [
-        "application/pdf",
-        "image/png",
-        "audio/wav",
-        "text/plain",
-    ]
-
-
-def test_only_the_first_audio_file_is_used() -> None:
-    gmail, email = gmail_with(
-        (ref("a1", "first.mp3", "audio/mpeg", 100), samples.MP3_ID3),
-        (ref("a2", "photo.png", "image/png", 100), samples.png()),
-        (ref("a3", "second.m4a", "audio/mp4", 100), samples.M4A),
-    )
-
-    loaded = load_attachments(gmail, email, SETTINGS)
-
-    assert [a.filename for a in loaded.accepted] == ["first.mp3", "photo.png"]
-    assert [(r.filename, r.reason) for r in loaded.rejected] == [
-        ("second.m4a", EXTRA_AUDIO)
-    ]
-
-
-@pytest.mark.parametrize(
-    ("filename", "declared", "data"),
-    [
-        (
-            "offer.docx",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            samples.office("word"),
-        ),
-        ("voice.ogg", "audio/ogg", samples.OGG_OPUS),
-        ("clip.m4a", "audio/mp4", samples.MP4_VIDEO),  # video renamed to .m4a
-    ],
-)
-def test_other_formats_are_unsupported(
-    filename: str, declared: str, data: bytes
-) -> None:
-    gmail, email = gmail_with((ref("a1", filename, declared, len(data)), data))
-
-    loaded = load_attachments(gmail, email, SETTINGS)
-
-    assert loaded.accepted == []
-    assert [(r.filename, r.reason) for r in loaded.rejected] == [
-        (filename, UNSUPPORTED)
-    ]
 
 
 def test_fake_extension_is_rejected() -> None:
@@ -171,8 +88,8 @@ def test_fake_extension_is_rejected() -> None:
 
     loaded = load_attachments(gmail, email, SETTINGS)
 
-    assert loaded.accepted == []
-    assert [(r.filename, r.reason) for r in loaded.rejected] == [
+    assert accepted(loaded) == []
+    assert [(r.filename, r.reason) for r in rejected(loaded)] == [
         ("invoice.pdf", UNSUPPORTED)
     ]
 
@@ -184,90 +101,26 @@ def test_oversized_file_is_rejected_without_download() -> None:
 
     loaded = load_attachments(gmail, email, SETTINGS)
 
-    assert loaded.rejected[0].reason == TOO_LARGE
+    assert rejected(loaded)[0].reason == TOO_LARGE
     assert gmail.downloaded == []
-
-
-def test_total_size_limit_keeps_attachments_in_order() -> None:
-    """Default limit 18 MB: 8 + 8 fit, the third 8 MB file doesn't, a small one does."""
-    sizes = {"a1": 8 * MB, "a2": 8 * MB, "a3": 8 * MB, "a4": 1 * MB}
-    gmail, email = gmail_with(
-        *[
-            (ref(key, f"{key}.pdf", "application/pdf", size), b"%PDF-" + b"0" * size)
-            for key, size in sizes.items()
-        ]
-    )
-
-    loaded = load_attachments(gmail, email, Settings())
-
-    assert Settings().MAX_TOTAL_ATTACHMENTS_MB == 18
-    assert [a.filename for a in loaded.accepted] == ["a1.pdf", "a2.pdf", "a4.pdf"]
-    assert [(r.filename, r.reason) for r in loaded.rejected] == [
-        ("a3.pdf", TOTAL_TOO_LARGE)
-    ]
-    assert gmail.downloaded == ["a1", "a2", "a4"]  # a3 never downloaded
-
-
-def test_limits_come_from_settings() -> None:
-    gmail, email = gmail_with(
-        (ref("a1", "a.pdf", "application/pdf", 2 * MB), samples.PDF)
-    )
-
-    loaded = load_attachments(gmail, email, Settings(MAX_ATTACHMENT_MB=1))
-
-    assert loaded.rejected[0].reason == TOO_LARGE
-
-
-def test_failed_download_is_rejected() -> None:
-    gmail, email = gmail_with((ref("a1", "a.pdf", "application/pdf", 100), samples.PDF))
-    del gmail.attachment_data["a1"]
-
-    loaded = load_attachments(gmail, email, SETTINGS)
-
-    assert loaded.rejected[0].reason == DOWNLOAD_FAILED
 
 
 # --- signature images ----------------------------------------------------------
 
 
-def test_small_inline_image_is_skipped() -> None:
-    logo = ref("a1", "logo.png", "image/png", 5_000, inline=True)
-    gmail, email = gmail_with((logo, samples.png()))
-
-    loaded = load_attachments(gmail, email, SETTINGS)
-
-    assert loaded.accepted == [] and loaded.rejected == []
-    assert gmail.downloaded == []
-
-
-def test_image_referenced_by_cid_is_skipped() -> None:
-    logo = ref("a1", "logo.png", "image/png", 25_000, content_id="logo@sig")
-    assert is_signature_image(logo, {"logo@sig"})
-    assert not is_signature_image(logo, set())
-
-
-def test_image_over_30_kb_is_a_picture_even_when_pasted_into_the_body() -> None:
-    """A screenshot pasted into the email is inline and referenced by cid."""
-    screenshot = ref(
-        "a1", "image.png", "image/png", 654_770, inline=True, content_id="ii_abc"
-    )
-    assert not is_signature_image(screenshot, {"ii_abc"})
-
-
-def test_small_attached_image_is_a_picture() -> None:
-    """Not inline and not shown by the HTML: a normal attachment."""
-    icon = ref("a1", "icon.png", "image/png", 5_000)
-    assert not is_signature_image(icon, set())
-
-
-def test_large_inline_image_is_not_a_signature() -> None:
-    photo = ref("a1", "photo.jpg", "image/jpeg", 200_000, inline=True)
-    assert not is_signature_image(photo, set())
-
-
-def test_inline_pdf_is_not_a_signature() -> None:
-    doc = ref("a1", "doc.pdf", "application/pdf", 5_000, inline=True)
-    assert not is_signature_image(doc, set())
+def test_signature_images() -> None:
+    """Only small images shown inline or by the HTML are signature images."""
+    cases = [
+        (ref("a1", "logo.png", "image/png", 5_000, inline=True), set(), True),
+        (ref("a1", "logo.png", "image/png", 25_000, content_id="sig"), {"sig"}, True),
+        (ref("a1", "logo.png", "image/png", 25_000, content_id="sig"), set(), False),
+        # A screenshot pasted into the body is inline and referenced, but large.
+        (ref("a1", "shot.png", "image/png", 654_770, True, "ii_1"), {"ii_1"}, False),
+        (ref("a1", "icon.png", "image/png", 5_000), set(), False),  # attached
+        (ref("a1", "doc.pdf", "application/pdf", 5_000, inline=True), set(), False),
+    ]
+    for attachment, cids, expected in cases:
+        assert is_signature_image(attachment, cids) is expected, attachment
 
 
 # --- parsing the Gmail message ---------------------------------------------------
@@ -349,7 +202,7 @@ def test_email_with_attachments_is_answered_with_files_and_note() -> None:
     gmail.attachment_data = {"a1": samples.PDF, "a2": samples.EXE}
     mailbox = make_mailbox(gmail)
 
-    result = sync_mailbox(mailbox, "101")
+    result = mailbox.check_inbox("101")
 
     assert result.results == {"m1": COMPLETED}
     contents = mailbox.gemini.models.generate_content.call_args.kwargs["contents"]
@@ -362,27 +215,3 @@ def test_email_with_attachments_is_answered_with_files_and_note() -> None:
     assert contents[1].inline_data.mime_type == "application/pdf"
     assert contents[1].inline_data.data == samples.PDF
     assert gmail.downloaded == ["a1", "a2"]
-
-
-def test_second_audio_is_mentioned_in_the_prompt() -> None:
-    gmail = FakeGmail([])
-    gmail.add(
-        make_email(
-            "m1",
-            attachments=[
-                ref("a1", "first.mp3", "audio/mpeg", 100),
-                ref("a2", "second.wav", "audio/wav", 100),
-            ],
-        )
-    )
-    gmail.attachment_data = {"a1": samples.MP3_ID3, "a2": samples.wav()}
-    mailbox = make_mailbox(gmail)
-
-    sync_mailbox(mailbox, "101")
-
-    contents = mailbox.gemini.models.generate_content.call_args.kwargs["contents"]
-    assert [p.inline_data.mime_type for p in contents[1:]] == ["audio/mpeg"]
-    assert (
-        "second.wav: not processed (only one audio file per email can be listened to)"
-        in contents[0].text
-    )

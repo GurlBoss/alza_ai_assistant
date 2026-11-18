@@ -34,6 +34,9 @@ class AttachmentRef:
 
 @dataclass
 class Email:
+    """An incoming Gmail message with everything needed to filter, answer and reply in
+    its thread."""
+
     id: str
     thread_id: str
     sender: str
@@ -55,17 +58,6 @@ class HistoryExpiredError(Exception):
 
 def get_credentials(settings: Settings) -> Credentials:
     """Exchanges the refresh token for an access token."""
-    missing = [
-        name
-        for name in (
-            "GMAIL_CLIENT_ID",
-            "GMAIL_CLIENT_SECRET",
-            "GMAIL_OAUTH_REFRESH_TOKEN",
-        )
-        if not getattr(settings, name)
-    ]
-    if missing:
-        raise RuntimeError(f"Missing settings: {', '.join(missing)}")
     creds = Credentials(
         token=None,
         refresh_token=settings.GMAIL_OAUTH_REFRESH_TOKEN,
@@ -79,18 +71,22 @@ def get_credentials(settings: Settings) -> Credentials:
 
 
 class GmailClient:
+    """Thin wrapper around the Gmail API for the bot's mailbox (userId="me")."""
+
     def __init__(self, service: Any) -> None:
         self.service = service
 
     @classmethod
     def from_credentials(cls, creds: Credentials) -> "GmailClient":
-        """Not thread-safe (one shared httplib2 connection): use one per request."""
+        """Not thread-safe: use one per request."""
         return cls(build("gmail", "v1", credentials=creds, cache_discovery=False))
 
     def get_address(self) -> str:
+        """The bot's own email address."""
         return self.service.users().getProfile(userId="me").execute()["emailAddress"]
 
     def get_history_id(self) -> str:
+        """The mailbox's current historyId (its latest change number)."""
         return self.service.users().getProfile(userId="me").execute()["historyId"]
 
     def list_unread_ids(self) -> list[str]:
@@ -108,9 +104,8 @@ class GmailClient:
         return ids[::-1]  # Gmail lists newest first
 
     def list_history(self, start_history_id: str) -> tuple[list[str], str]:
-        """IDs of messages added to INBOX since start_history_id, and the latest historyId.
-
-        Raises HistoryExpiredError when Gmail no longer has history that old.
+        """IDs of messages added to INBOX since start_history_id, and the latest
+        historyId. Raises HistoryExpiredError when Gmail no longer has that history.
         """
         ids: list[str] = []
         request = (
@@ -159,6 +154,7 @@ class GmailClient:
         )
 
     def get_email(self, message_id: str) -> Email:
+        """Downloads one message in full and parses it into an Email."""
         message = (
             self.service.users()
             .messages()
@@ -168,6 +164,7 @@ class GmailClient:
         return parse_message(message)
 
     def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        """Downloads one attachment's content into memory."""
         response = (
             self.service.users()
             .messages()
@@ -178,15 +175,20 @@ class GmailClient:
         return base64.urlsafe_b64decode(response["data"])
 
     def send(self, body: dict[str, str]) -> dict[str, Any]:
+        """Sends a prepared message (raw MIME and threadId); returns Gmail's response
+        with its id."""
         return self.service.users().messages().send(userId="me", body=body).execute()
 
     def mark_read(self, message_id: str) -> None:
+        """Removes the UNREAD label from a message."""
         self.service.users().messages().modify(
             userId="me", id=message_id, body={"removeLabelIds": ["UNREAD"]}
         ).execute()
 
 
 def parse_message(message: dict[str, Any]) -> Email:
+    """Turns a Gmail API message (format=full) into an Email: headers, body, labels and
+    attachment list."""
     payload = message["payload"]
     headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
     return Email(
@@ -231,6 +233,7 @@ def _collect_attachments(part: dict[str, Any]) -> list[AttachmentRef]:
 
 
 def _referenced_cids(payload: dict[str, Any]) -> set[str]:
+    """Content-IDs that the HTML body shows as images (cid:...), lower-case."""
     html = _find_part(payload, "text/html") or ""
     return {cid.lower() for cid in re.findall(r"cid:([^\"'>\s)]+)", html, re.I)}
 
@@ -247,6 +250,8 @@ def _extract_body(payload: dict[str, Any]) -> str:
 
 
 def _find_part(part: dict[str, Any], mime_type: str) -> str | None:
+    """Decoded text of the first MIME part of the given type, searching nested parts;
+    None if there is none."""
     if part.get("mimeType") == mime_type and part.get("body", {}).get("data"):
         return base64.urlsafe_b64decode(part["body"]["data"]).decode(
             "utf-8", errors="replace"

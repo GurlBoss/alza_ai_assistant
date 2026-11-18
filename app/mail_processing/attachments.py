@@ -1,128 +1,76 @@
-"""Downloads and checks email attachments. Everything stays in memory."""
+"""Downloads email attachments and decides which go to Gemini, using the rules in
+filters.py. Everything stays in memory."""
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from app.config import Settings
+from app.mail_processing.filters import (
+    content_rejection,
+    filter_type,
+    is_signature_image,
+    size_rejection,
+)
 from app.mail_processing.gmail import AttachmentRef, Email, GmailClient
 
 log = logging.getLogger(__name__)
 
-# Supported: images (JPEG, PNG, WebP), audio (below), PDF and plain text.
-AUDIO_TYPES = {"audio/mpeg", "audio/mp4", "audio/wav"}
+# Attachment states.
+ACCEPTED = "ACCEPTED"  # sent to Gemini
+REJECTED = "REJECTED"  # not used; the reply mentions it with the reason
 
-# Larger images are always treated as real pictures (photos, pasted screenshots).
-SIGNATURE_IMAGE_MAX_BYTES = 30 * 1024
-
-UNSUPPORTED = "unsupported file type"
-TOO_LARGE = "file is too large"
-TOTAL_TOO_LARGE = "attachments together are too large"
-EXTRA_AUDIO = "only one audio file per email can be listened to"
 DOWNLOAD_FAILED = "could not be downloaded"
-
-# MP4 container brands that mean M4A audio; any other brand (video) is unsupported.
-M4A_BRANDS = {b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"F4B "}
 
 
 @dataclass
 class Attachment:
+    """An email attachment: ACCEPTED with its data and verified type, or REJECTED
+    with the reason."""
+
     filename: str
-    mime_type: str  # verified by content
-    data: bytes
-
-
-@dataclass
-class RejectedAttachment:
-    filename: str
-    reason: str
-
-
-@dataclass
-class LoadedAttachments:
-    accepted: list[Attachment] = field(default_factory=list)
-    rejected: list[RejectedAttachment] = field(default_factory=list)
-
-
-def detect_type(data: bytes, declared: str = "") -> str | None:
-    """The real MIME type from the file content, or None when it is not one of
-    the supported formats (images, MP3/M4A/WAV, PDF, plain text).
-
-    declared only decides whether text-looking data is meant as plain text; it
-    never makes binary data acceptable.
-    """
-    if data.startswith(b"%PDF-"):
-        return "application/pdf"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
-        return "audio/wav"
-    if data[4:8] == b"ftyp" and data[8:12] in M4A_BRANDS:
-        return "audio/mp4"
-    if data.startswith(b"ID3") or _is_mpeg_audio_frame(data):
-        return "audio/mpeg"
-    if declared.startswith("text/plain") and b"\x00" not in data[:4096]:
-        return "text/plain"
-    return None
-
-
-def _is_mpeg_audio_frame(data: bytes) -> bool:
-    # 11-bit frame sync, a valid MPEG version and a layer other than 00 (= AAC).
-    return (
-        len(data) >= 2
-        and data[0] == 0xFF
-        and data[1] & 0xE0 == 0xE0
-        and (data[1] >> 3) & 0b11 != 0b01
-        and (data[1] >> 1) & 0b11 != 0b00
-    )
-
-
-def is_signature_image(ref: AttachmentRef, referenced_cids: set[str]) -> bool:
-    """Logos and icons from signatures: small images shown inline or by the HTML."""
-    if not ref.mime_type.startswith("image/") or ref.size > SIGNATURE_IMAGE_MAX_BYTES:
-        return False
-    return ref.inline or (ref.content_id != "" and ref.content_id in referenced_cids)
+    mime_type: str = ""  # verified by content
+    data: bytes = b""
+    state: str = ACCEPTED
+    reason: str = ""  # why it was rejected
 
 
 def load_attachments(
     gmail: GmailClient, email: Email, settings: Settings
-) -> LoadedAttachments:
-    """Downloads the usable attachments, in order; never raises for one attachment.
+) -> list[Attachment]:
+    """Accepts or rejects each attachment; never raises for one attachment.
 
-    Rules: per-file and per-email size limits (checked from the metadata before
-    downloading), types verified by content, at most one audio file.
+    The smallest are checked first, so as many as possible fit into the per-email
+    limit; the result keeps the email's order. Signature images are left out.
     """
     started = time.monotonic()
     max_file = int(settings.MAX_ATTACHMENT_MB * 1024 * 1024)
     max_total = int(settings.MAX_TOTAL_ATTACHMENTS_MB * 1024 * 1024)
-    result = LoadedAttachments()
+    loaded: dict[int, Attachment] = {}  # position in the email -> attachment
 
-    for number, ref in enumerate(email.attachments, start=1):
+    numbered = enumerate(email.attachments, start=1)
+    for number, ref in sorted(numbered, key=lambda pair: pair[1].size):
         if is_signature_image(ref, email.referenced_cids):
             _log(email, number, ref, "skipped (signature image)")
-            continue
-        room = max_total - sum(len(item.data) for item in result.accepted)
-        has_audio = any(item.mime_type in AUDIO_TYPES for item in result.accepted)
-        attachment, reason = _load_one(gmail, email, ref, max_file, room, has_audio)
-        if attachment:
-            result.accepted.append(attachment)
-            _log(email, number, ref, f"accepted as {attachment.mime_type}")
         else:
-            result.rejected.append(RejectedAttachment(ref.filename, reason))
-            _log(email, number, ref, f"rejected ({reason})")
+            accepted = [item for item in loaded.values() if item.state == ACCEPTED]
+            room = max_total - sum(len(item.data) for item in accepted)
+            attachment = _load_one(gmail, email, ref, max_file, room)
+            loaded[number] = attachment
+            if attachment.state == ACCEPTED:
+                _log(email, number, ref, f"accepted as {attachment.mime_type}")
+            else:
+                _log(email, number, ref, f"rejected ({attachment.reason})")
 
+    attachments = [loaded[number] for number in sorted(loaded)]
     log.info(
         "Attachments of %s: %d accepted, %d rejected in %.1f s",
         email.id,
-        len(result.accepted),
-        len(result.rejected),
+        sum(item.state == ACCEPTED for item in attachments),
+        sum(item.state == REJECTED for item in attachments),
         time.monotonic() - started,
     )
-    return result
+    return attachments
 
 
 def _load_one(
@@ -131,28 +79,30 @@ def _load_one(
     ref: AttachmentRef,
     max_file: int,
     room: int,
-    has_audio: bool,
-) -> tuple[Attachment | None, str]:
-    """(attachment, "") when usable, otherwise (None, rejection reason)."""
-    if ref.size > max_file:
-        return None, TOO_LARGE
-    if ref.size > room:
-        return None, TOTAL_TOO_LARGE
-    try:
-        data = gmail.get_attachment(email.id, ref.attachment_id)
-    except Exception as exc:
-        log.warning("Attachment download failed: %s", type(exc).__name__)
-        return None, DOWNLOAD_FAILED
-    mime_type = detect_type(data, ref.mime_type)
-    if mime_type is None:
-        return None, UNSUPPORTED
-    if mime_type in AUDIO_TYPES and has_audio:
-        return None, EXTRA_AUDIO
-    return Attachment(ref.filename, mime_type, data), ""
+) -> Attachment:
+    """Checks the size, downloads the attachment and checks its content type."""
+    data, mime_type = b"", None
+    reason = size_rejection(ref, max_file, room)
+    if reason is None:
+        try:
+            data = gmail.get_attachment(email.id, ref.attachment_id)
+        except Exception as exc:
+            log.warning("Attachment download failed: %s", type(exc).__name__)
+            reason = DOWNLOAD_FAILED
+    if reason is None:
+        mime_type = filter_type(data, ref.mime_type)
+        reason = content_rejection(mime_type)
+
+    if reason is None:
+        attachment = Attachment(ref.filename, mime_type, data)
+    else:
+        attachment = Attachment(ref.filename, state=REJECTED, reason=reason)
+    return attachment
 
 
 def _log(email: Email, number: int, ref: AttachmentRef, outcome: str) -> None:
-    # Type and size only: no file names or contents.
+    """Logs the decision about one attachment: its declared type, size and outcome,
+    never its name or content."""
     log.info(
         "Attachment %d of %s: declared=%s size=%d -> %s",
         number,

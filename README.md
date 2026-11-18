@@ -6,26 +6,26 @@ AI email assistant for Gmail: reads incoming emails with PDF, image and audio at
 
 ```
 app/main.py                       FastAPI: /health, /gmail/webhook (Pub/Sub push),
-                                  /internal/gmail/renew-watch, /internal/gmail/recovery-sync
-app/config.py                     settings from env vars (GCP_PROJECT_ID, REGION, GMAIL_*, GEMINI_*, ...)
+                                  /internal/gmail/renew-watch, /internal/gmail/recovery-check-inbox
+app/config.py                     settings from env vars; required vs optional: see .env.example
 
 app/mail_processing/gmail.py      Gmail API: access token, history, messages, send, mark read, watch
-app/mail_processing/sync.py       Gmail history since the stored historyId (gmail_sync/state)
-app/mail_processing/filters.py    own/SENT/SPAM/promotions/auto-reply/bulk mail, 5 replies per thread
-app/mail_processing/processor.py  one email: Firestore claim, reply (fallback if Gemini fails), mark read
+app/mail_processing/mailbox.py    Mailbox: check_inbox -> handle_message -> process_email
+app/mail_processing/filters.py    which emails not to answer (own/SPAM/auto-reply/bulk, 5 replies per
+                                  thread) and attachment rules (type by content, size, signature images)
 app/mail_processing/reply.py      reply in the original thread (threadId, In-Reply-To, References)
-app/mail_processing/attachments.py  download, content-based type check, size and audio limits, signature images
-app/mail_processing/store.py      Firestore state (processed_emails, gmail_sync) + in-memory versions
+app/mail_processing/attachments.py  downloads attachments, accepted/rejected by the rules in filters.py
 
+app/ai_core/llm.py                Gemini on Vertex AI: builds the prompt, attachments as inline parts, retry
+app/ai_core/rag.py                RAG Engine retrieval tool for the Gemini call, grounding logs
+app/ai_core/instructions.py       all texts for Gemini: system instruction, task, block markers
 
-app/knowledge_base/rag.py         RAG Engine retrieval tool for the Gemini call, grounding logs
-
-app/ai_core/llm.py                Gemini on Vertex AI: system instruction, EMAIL block, attachments as inline parts, retry
-
+app/utils/firestore_storage.py    all Firestore access: email records + history ID
 app/utils/auth.py                 OIDC check (audience SERVICE_URL, caller INVOKER_SERVICE_ACCOUNT)
 
 scripts/run_once.py               answers the oldest unread email once, from the terminal
-scripts/test_rag.py "question"    shows the chunks RAG Engine retrieves (retrieveContexts)
+scripts/run_once_recovery.py      the same, but also retries emails that FAILED without a reply
+scripts/get_rag_info.py           RAG Engine corpus: settings, files and chunks per file (--chunks)
 tests/                            pytest tests (Gmail, Firestore and Gemini mocked)
 cloudbuild.yaml                   black check → tests → docker build → push → deploy to Cloud Run
 token-refresh/                    one-time script that gets the Gmail OAuth refresh token
@@ -52,7 +52,7 @@ docker run --rm -p 8080:8080 --env-file .env email-bot
 
 `scripts/run_once.py` answers the oldest unread INBOX email that is not yet in
 Firestore with a Gemini reply in the same thread and marks it as read.
-Set `GEMINI_MODEL` in `.env`; locally Firestore and Vertex AI use your
+Fill the required values in `.env` (see `.env.example`); locally Firestore and Vertex AI use your
 Application Default Credentials.
 Fill the Gmail values in `.env` from Secret Manager (values are not printed):
 
