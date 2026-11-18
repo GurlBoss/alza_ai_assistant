@@ -9,7 +9,7 @@ from google import genai
 from google.genai import errors, types
 
 from app.config import Settings
-from app.knowledge_base.rag import Snippet
+from app.knowledge_base.rag import log_grounding
 from app.mail_processing.attachments import Attachment, RejectedAttachment
 
 log = logging.getLogger(__name__)
@@ -24,14 +24,15 @@ You answer customer emails.
 
 Rules:
 - Reply in the same language as the customer's email.
-- The KNOWLEDGE block contains excerpts from Alza's own documents, each with
-  its source. Answer questions about Alza's products, services and policies
-  only from KNOWLEDGE; never guess or use general knowledge for them.
-- If KNOWLEDGE does not contain the answer, say that you don't have this
-  information and offer to pass the email to a colleague.
-- When you used KNOWLEDGE, end the reply with one last line, after the
-  signature, naming the source document(s), e.g. "Source: shipping.md"
-  (translated into the reply's language).
+- You can retrieve knowledge from Alza's own documents about its products,
+  services and policies. Answer questions about Alza services only from the
+  retrieved knowledge; never guess or use general knowledge for them.
+- If the retrieved knowledge does not contain the answer, say that you don't
+  have this information and offer to pass the email to a colleague.
+- When you used retrieved knowledge, end the reply with one last line, after
+  the signature, naming the source document(s) you actually retrieved, as
+  "Source: <document name>" (translated into the reply's language). Never name
+  a document you did not retrieve.
 - Be short, polite and professional. Plain text only, no Markdown.
 - Never promise refunds, discounts, compensation or delivery dates.
 - If you don't know the answer or lack the information, say so honestly
@@ -49,12 +50,18 @@ Rules:
 - Sign as "Alza AI Assistant".
 """
 
+# Added when Gemini runs without the retrieval tool (not configured, or the
+# fallback after a failure), so it doesn't invent knowledge or sources.
+NO_KNOWLEDGE_INSTRUCTION = """\
+- The knowledge base is not available for this email. For questions about Alza
+  services, say that you don't have this information right now and offer to
+  pass the email to a colleague. Do not add a source line.
+"""
+
 EMAIL_START = "=== EMAIL START ==="
 EMAIL_END = "=== EMAIL END ==="
 # Anything that looks like one of our block markers, e.g. "=== ATTACHMENT 2 END ===".
-MARKER_PATTERN = re.compile(
-    r"===\s*(?:EMAIL|ATTACHMENT|KNOWLEDGE)\b[^=\n]*===", re.IGNORECASE
-)
+MARKER_PATTERN = re.compile(r"===\s*(?:EMAIL|ATTACHMENT)\b[^=\n]*===", re.IGNORECASE)
 TEXT_ATTACHMENT_MAX_CHARS = 50_000
 
 URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
@@ -85,7 +92,6 @@ def build_prompt(
     body: str,
     attachments: Sequence[Attachment] = (),
     not_processed: Sequence[RejectedAttachment] = (),
-    knowledge: Sequence[Snippet] = (),
 ) -> str:
     """The text part of the request. Text attachments are included here; other
     attachments are listed and sent as separate file parts, in the same order."""
@@ -111,7 +117,6 @@ def build_prompt(
 
     parts = [
         "Write a reply to the customer email below.",
-        _knowledge_block(knowledge),
         f"{EMAIL_START}\n" + "\n".join(lines) + f"\n{EMAIL_END}",
         *text_blocks,
     ]
@@ -121,15 +126,6 @@ def build_prompt(
             "Add one polite sentence to the reply naming them."
         )
     return "\n\n".join(parts)
-
-
-def _knowledge_block(snippets: Sequence[Snippet]) -> str:
-    entries = [
-        f"[{number}] Source: {snippet.source}\n{strip_markers(snippet.text)}"
-        for number, snippet in enumerate(snippets, start=1)
-    ]
-    content = "\n\n".join(entries) or "(no relevant documents found)"
-    return f"=== KNOWLEDGE START ===\n{content}\n=== KNOWLEDGE END ==="
 
 
 def _text_block(number: int, data: bytes) -> str:
@@ -165,21 +161,32 @@ def generate_reply(
     body: str,
     attachments: Sequence[Attachment] = (),
     not_processed: Sequence[RejectedAttachment] = (),
-    knowledge: Sequence[Snippet] = (),
+    rag_tool: types.Tool | None = None,
+    rag_debug: bool = False,
 ) -> str:
     """Returns Gemini's reply. Raises the last error when both attempts fail.
 
     Everything goes into one request: the prompt (with text attachments), then
-    the other attachments as inline file parts.
+    the other attachments as inline file parts. With rag_tool, Gemini retrieves
+    from the knowledge base itself. If a call with the tool fails, the retry
+    goes without it, so the knowledge base never blocks the reply.
     """
-    config = types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-    prompt = build_prompt(subject, body, attachments, not_processed, knowledge)
+    prompt = build_prompt(subject, body, attachments, not_processed)
     contents = [types.Part.from_text(text=prompt)] + [
         types.Part.from_bytes(data=item.data, mime_type=item.mime_type)
         for item in attachments
         if item.mime_type != "text/plain"
     ]
+    tools = [rag_tool] if rag_tool else []
     for attempt in range(1, ATTEMPTS + 1):
+        config = types.GenerateContentConfig(
+            system_instruction=(
+                SYSTEM_INSTRUCTION
+                if tools
+                else SYSTEM_INSTRUCTION + NO_KNOWLEDGE_INSTRUCTION
+            ),
+            tools=tools or None,
+        )
         started = time.monotonic()
         try:
             response = client.models.generate_content(
@@ -195,17 +202,27 @@ def generate_reply(
                 time.monotonic() - started,
                 type(exc).__name__,
             )
-            if attempt == ATTEMPTS or not _is_retryable(exc):
+            if attempt == ATTEMPTS:
+                raise
+            if tools:
+                log.warning("Retrying without the knowledge base (RAG tool)")
+                tools = []
+                continue
+            if not _is_retryable(exc):
                 raise
             time.sleep(BACKOFF_SECONDS * attempt)
             continue
         log.info(
-            "Gemini answered in %.1f s (model=%s, attempt %d, %d attachment(s))",
+            "Gemini answered in %.1f s (model=%s, attempt %d, %d attachment(s), "
+            "knowledge base %s)",
             time.monotonic() - started,
             model,
             attempt,
             len(attachments),
+            "on" if tools else "off",
         )
+        if tools:
+            log_grounding(response, rag_debug)
         customer_text = "\n".join(
             [subject, body]
             + [

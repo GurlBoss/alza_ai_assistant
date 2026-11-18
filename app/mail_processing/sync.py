@@ -7,7 +7,6 @@ from typing import Any
 from googleapiclient.errors import HttpError
 
 from app.config import Settings
-from app.knowledge_base.rag import KnowledgeBase
 from app.mail_processing.filters import skip_reason, thread_limit_reached
 from app.mail_processing.gmail import GmailClient, HistoryExpiredError
 from app.mail_processing.processor import process_email
@@ -33,7 +32,6 @@ class Mailbox:
     sync_state: SyncState
     gemini: Any
     settings: Settings
-    knowledge: KnowledgeBase | None = None
 
 
 def sync_mailbox(
@@ -98,5 +96,4 @@ def handle_message(mailbox: Mailbox, message_id: str) -> str:
         mailbox.settings,
         mailbox.own_address,
         mailbox.gemini,
-        mailbox.knowledge,
     )

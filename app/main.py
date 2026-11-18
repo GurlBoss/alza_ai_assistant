@@ -13,7 +13,6 @@ from app.utils.auth import verify_oidc
 from app.config import settings
 from app.mail_processing.gmail import GmailClient, get_credentials
 from app.ai_core.llm import make_client
-from app.knowledge_base.rag import KnowledgeBase, is_kb_object
 from app.mail_processing.store import FirestoreStore, FirestoreSyncState
 from app.mail_processing.sync import Mailbox, SyncResult, sync_mailbox
 
@@ -32,11 +31,6 @@ def gmail_credentials() -> Credentials:
 
 
 @lru_cache(maxsize=1)
-def knowledge_base() -> KnowledgeBase | None:
-    return KnowledgeBase.from_settings(settings)
-
-
-@lru_cache(maxsize=1)
 def shared_mailbox() -> Mailbox:
     """Clients that are safe to share between concurrent requests."""
     gmail = GmailClient.from_credentials(gmail_credentials())
@@ -49,7 +43,6 @@ def shared_mailbox() -> Mailbox:
         sync_state=FirestoreSyncState(settings.GCP_PROJECT_ID),
         gemini=make_client(settings),
         settings=settings,
-        knowledge=knowledge_base(),
     )
 
 
@@ -127,37 +120,3 @@ async def recovery_sync(mailbox: Mailbox = Depends(get_mailbox)) -> dict:
 async def run_sync(mailbox: Mailbox, history_id: str | None) -> SyncResult:
     # Gmail, Firestore and Gemini clients are blocking; keep the event loop free.
     return await run_in_threadpool(sync_mailbox, mailbox, history_id)
-
-
-# Eventarc (Cloud Storage events): a file in gs://KB_BUCKET was written or deleted.
-# Both are safe to repeat: unchanged files are skipped by their hash.
-@app.post("/internal/kb/index", dependencies=[Depends(verify_oidc)])
-async def kb_index(request: Request) -> dict[str, str]:
-    return await handle_kb_event(request, "index")
-
-
-@app.post("/internal/kb/delete", dependencies=[Depends(verify_oidc)])
-async def kb_delete(request: Request) -> dict[str, str]:
-    return await handle_kb_event(request, "delete")
-
-
-async def handle_kb_event(request: Request, action: str) -> dict[str, str]:
-    try:
-        event = await request.json()
-        bucket, name = event["bucket"], event["name"]
-    except (ValueError, KeyError, TypeError) as exc:
-        raise HTTPException(
-            status_code=400, detail="Not a Cloud Storage event"
-        ) from exc
-
-    if bucket != settings.KB_BUCKET or not is_kb_object(name):
-        log.info("KB event for %s/%s ignored (not a knowledge base file)", bucket, name)
-        return {"result": "IGNORED"}
-
-    knowledge = knowledge_base()
-    if knowledge is None:
-        # 503 makes Eventarc retry, so the event isn't lost while config is missing.
-        raise HTTPException(status_code=503, detail="Knowledge base not configured")
-    handler = knowledge.index_file if action == "index" else knowledge.delete_file
-    result = await run_in_threadpool(handler, name)
-    return {"result": result}

@@ -44,7 +44,9 @@ def test_generate_reply_sends_model_and_system_instruction() -> None:
 
     kwargs = client.models.generate_content.call_args.kwargs
     assert kwargs["model"] == "gemini-x"
-    assert kwargs["config"].system_instruction == llm.SYSTEM_INSTRUCTION
+    assert kwargs["config"].system_instruction == (
+        llm.SYSTEM_INSTRUCTION + llm.NO_KNOWLEDGE_INSTRUCTION  # called without RAG
+    )
     assert EMAIL_START in kwargs["contents"][0].text
     assert len(kwargs["contents"]) == 1  # no attachments, text only
 

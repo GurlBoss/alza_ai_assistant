@@ -175,12 +175,12 @@ class TestOidc:
             "SERVICE_URL",
             "https://svc-123.europe-west1.run.app, https://svc-abc-ew.a.run.app/",
         ):
-            accepted = self.accepted_audiences("/internal/kb/index")
+            accepted = self.accepted_audiences("/internal/gmail/renew-watch")
         assert accepted == [
             "https://svc-123.europe-west1.run.app",
-            "https://svc-123.europe-west1.run.app/internal/kb/index",
+            "https://svc-123.europe-west1.run.app/internal/gmail/renew-watch",
             "https://svc-abc-ew.a.run.app",
-            "https://svc-abc-ew.a.run.app/internal/kb/index",
+            "https://svc-abc-ew.a.run.app/internal/gmail/renew-watch",
         ]
 
     def test_audience_for_another_path_or_service_is_not_accepted(self) -> None:
