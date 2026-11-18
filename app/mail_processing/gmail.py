@@ -22,6 +22,18 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
 @dataclass
+class AttachmentRef:
+    """An attachment as described by the message metadata, not yet downloaded."""
+
+    attachment_id: str
+    filename: str
+    mime_type: str  # as declared by the sender, not trusted
+    size: int  # bytes, computed by Gmail
+    inline: bool  # Content-Disposition: inline
+    content_id: str  # without <>, lower-case; "" when missing
+
+
+@dataclass
 class Email:
     id: str
     thread_id: str
@@ -33,6 +45,9 @@ class Email:
     received_at: datetime
     label_ids: list[str] = field(default_factory=list)
     headers: dict[str, str] = field(default_factory=dict)  # lower-case names
+    attachments: list[AttachmentRef] = field(default_factory=list)
+    # Content-IDs the HTML body shows as images (cid:...), lower-case.
+    referenced_cids: set[str] = field(default_factory=set)
 
 
 class HistoryExpiredError(Exception):
@@ -164,6 +179,16 @@ class GmailClient:
         )
         return parse_message(message)
 
+    def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        response = (
+            self.service.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=message_id, id=attachment_id)
+            .execute()
+        )
+        return base64.urlsafe_b64decode(response["data"])
+
     def send(self, body: dict[str, str]) -> dict[str, Any]:
         return self.service.users().messages().send(userId="me", body=body).execute()
 
@@ -189,7 +214,37 @@ def parse_message(message: dict[str, Any]) -> Email:
         ),
         label_ids=message.get("labelIds", []),
         headers=headers,
+        attachments=_collect_attachments(payload),
+        referenced_cids=_referenced_cids(payload),
     )
+
+
+def _collect_attachments(part: dict[str, Any]) -> list[AttachmentRef]:
+    """Walks all MIME parts; every part with an attachmentId is an attachment."""
+    found = []
+    body = part.get("body", {})
+    if body.get("attachmentId"):
+        headers = {h["name"].lower(): h["value"] for h in part.get("headers", [])}
+        found.append(
+            AttachmentRef(
+                attachment_id=body["attachmentId"],
+                filename=part.get("filename", ""),
+                mime_type=part.get("mimeType", "").lower(),
+                size=int(body.get("size", 0)),
+                inline=headers.get("content-disposition", "")
+                .lower()
+                .startswith("inline"),
+                content_id=headers.get("content-id", "").strip("<> ").lower(),
+            )
+        )
+    for child in part.get("parts", []):
+        found.extend(_collect_attachments(child))
+    return found
+
+
+def _referenced_cids(payload: dict[str, Any]) -> set[str]:
+    html = _find_part(payload, "text/html") or ""
+    return {cid.lower() for cid in re.findall(r"cid:([^\"'>\s)]+)", html, re.I)}
 
 
 def _extract_body(payload: dict[str, Any]) -> str:

@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     # Newer Gemini models are served only from the global endpoint, not europe-west1.
     GEMINI_REGION: str = "global"
 
+    # Attachment limits: per file and per email, in megabytes. The total stays
+    # below Gemini's 20 MB inline request limit, leaving room for the prompt.
+    MAX_ATTACHMENT_MB: float = 10
+    MAX_TOTAL_ATTACHMENTS_MB: float = 18
+
     GMAIL_CLIENT_ID: str = ""
     GMAIL_CLIENT_SECRET: str = ""
     GMAIL_OAUTH_REFRESH_TOKEN: str = ""

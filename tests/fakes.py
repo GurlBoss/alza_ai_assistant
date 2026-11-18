@@ -43,6 +43,8 @@ class FakeGmail:
         self.sent_per_thread: dict[str, int] = {}
         self.sent: list[dict] = []
         self.read: list[str] = []
+        self.attachment_data: dict[str, bytes] = {}  # attachment ID -> bytes
+        self.downloaded: list[str] = []
 
     def add(self, email: Email) -> None:
         """Simulates a new INBOX message arriving."""
@@ -66,6 +68,12 @@ class FakeGmail:
         if message_id not in self.emails:
             raise not_found()
         return self.emails[message_id]
+
+    def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        self.downloaded.append(attachment_id)
+        if attachment_id not in self.attachment_data:
+            raise not_found()
+        return self.attachment_data[attachment_id]
 
     def count_sent_in_thread(self, thread_id: str) -> int:
         return self.sent_per_thread.get(thread_id, 0)

@@ -5,6 +5,7 @@ from email.utils import parseaddr
 from typing import Any
 
 from app.config import Settings
+from app.mail_processing.attachments import load_attachments
 from app.mail_processing.gmail import Email, GmailClient
 from app.ai_core.llm import generate_reply
 from app.mail_processing.reply import send_reply
@@ -62,8 +63,14 @@ def process_email(
 
     gemini_error = None
     try:
+        loaded = load_attachments(gmail, email, settings)
         reply_text = generate_reply(
-            gemini, settings.GEMINI_MODEL, email.subject, email.body
+            gemini,
+            settings.GEMINI_MODEL,
+            email.subject,
+            email.body,
+            loaded.accepted,
+            loaded.rejected,
         )
     except Exception as exc:
         # Only the exception type: messages can contain email content or tokens.

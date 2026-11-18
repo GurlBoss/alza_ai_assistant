@@ -14,9 +14,10 @@ app/mail_processing/sync.py       Gmail history since the stored historyId (gmai
 app/mail_processing/filters.py    own/SENT/SPAM/promotions/auto-reply/bulk mail, 5 replies per thread
 app/mail_processing/processor.py  one email: Firestore claim, reply (fallback if Gemini fails), mark read
 app/mail_processing/reply.py      reply in the original thread (threadId, In-Reply-To, References)
+app/mail_processing/attachments.py  download, content-based type check, size and audio limits, signature images
 app/mail_processing/store.py      Firestore state (processed_emails, gmail_sync) + in-memory versions
 
-app/ai_core/llm.py                Gemini on Vertex AI: system instruction, EMAIL block, timeout, one retry
+app/ai_core/llm.py                Gemini on Vertex AI: system instruction, EMAIL block, attachments as inline parts, retry
 
 app/utils/auth.py                 OIDC check (audience SERVICE_URL, caller INVOKER_SERVICE_ACCOUNT)
 
