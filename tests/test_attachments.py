@@ -177,9 +177,23 @@ def test_small_inline_image_is_skipped() -> None:
 
 
 def test_image_referenced_by_cid_is_skipped() -> None:
-    logo = ref("a1", "logo.png", "image/png", 50_000, content_id="logo@sig")
+    logo = ref("a1", "logo.png", "image/png", 25_000, content_id="logo@sig")
     assert is_signature_image(logo, {"logo@sig"})
     assert not is_signature_image(logo, set())
+
+
+def test_image_over_30_kb_is_a_picture_even_when_pasted_into_the_body() -> None:
+    """A screenshot pasted into the email is inline and referenced by cid."""
+    screenshot = ref(
+        "a1", "image.png", "image/png", 654_770, inline=True, content_id="ii_abc"
+    )
+    assert not is_signature_image(screenshot, {"ii_abc"})
+
+
+def test_small_attached_image_is_a_picture() -> None:
+    """Not inline and not shown by the HTML: a normal attachment."""
+    icon = ref("a1", "icon.png", "image/png", 5_000)
+    assert not is_signature_image(icon, set())
 
 
 def test_large_inline_image_is_not_a_signature() -> None:

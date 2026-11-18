@@ -13,7 +13,8 @@ IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 AUDIO_TYPES = {"audio/mpeg", "audio/mp4", "audio/wav"}
 DOCUMENT_TYPES = {"application/pdf", "text/plain"}
 
-SIGNATURE_IMAGE_MAX_BYTES = 20 * 1024
+# Larger images are always treated as real pictures (photos, pasted screenshots).
+SIGNATURE_IMAGE_MAX_BYTES = 30 * 1024
 
 UNSUPPORTED = "unsupported file type"
 TOO_LARGE = "file is too large"
@@ -82,11 +83,10 @@ def _is_mpeg_audio_frame(data: bytes) -> bool:
 
 
 def is_signature_image(ref: AttachmentRef, referenced_cids: set[str]) -> bool:
-    """Logos and icons from signatures: small inline images or ones the HTML shows."""
-    if not ref.mime_type.startswith("image/"):
+    """Logos and icons from signatures: small images shown inline or by the HTML."""
+    if not ref.mime_type.startswith("image/") or ref.size > SIGNATURE_IMAGE_MAX_BYTES:
         return False
-    small_inline = ref.inline and ref.size < SIGNATURE_IMAGE_MAX_BYTES
-    return small_inline or (ref.content_id != "" and ref.content_id in referenced_cids)
+    return ref.inline or (ref.content_id != "" and ref.content_id in referenced_cids)
 
 
 def load_attachments(
