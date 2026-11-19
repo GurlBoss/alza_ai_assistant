@@ -205,13 +205,20 @@ def test_email_with_attachments_is_answered_with_files_and_note() -> None:
     result = mailbox.check_inbox("101")
 
     assert result.results == {"m1": COMPLETED}
-    contents = mailbox.gemini.models.generate_content.call_args.kwargs["contents"]
+    describe_call, reply_call = mailbox.gemini.models.generate_content.call_args_list
+    # Step 1: the accepted PDF is described; the exe and the logo are not sent.
+    files = describe_call.kwargs["contents"][1:]
+    assert [(p.inline_data.mime_type, p.inline_data.data) for p in files] == [
+        ("application/pdf", samples.PDF)
+    ]
+    # Step 2: text only, so the knowledge base tool can be used.
+    contents = reply_call.kwargs["contents"]
+    assert len(contents) == 1
+    assert reply_call.kwargs["config"].tools  # RAG tool sent
     prompt = contents[0].text
-    assert "invoice.pdf (application/pdf)" in prompt
+    assert "invoice.pdf (application/pdf): file 1, described below" in prompt
+    assert "=== ATTACHMENT DESCRIPTIONS START ===" in prompt
     assert "setup.exe: not processed (unsupported file type)" in prompt
     assert "Add one polite sentence" in prompt
     assert "logo.png" not in prompt
-    assert len(contents) == 2
-    assert contents[1].inline_data.mime_type == "application/pdf"
-    assert contents[1].inline_data.data == samples.PDF
     assert gmail.downloaded == ["a1", "a2"]

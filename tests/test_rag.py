@@ -52,16 +52,16 @@ def tools_per_call(client: MagicMock) -> list:
 
 def test_last_attempt_goes_without_the_tool_with_a_warning(caplog) -> None:
     tool = build_rag_tool(Settings(RAG_CORPUS=CORPUS))
-    failures = [TimeoutError()] * (llm.ATTEMPTS - 1)
+    failures = [TimeoutError()] * (llm.REPLY_ATTEMPTS - 1)
     client = gemini(*failures, response("Without knowledge"))
 
     with caplog.at_level(logging.WARNING):
         answer = generate_reply(client, "m", "s", "b", rag_tool=tool)
 
     assert answer == "Without knowledge"
-    assert tools_per_call(client) == [[tool]] * (llm.ATTEMPTS - 1) + [None]
+    assert tools_per_call(client) == [[tool]] * (llm.REPLY_ATTEMPTS - 1) + [None]
     assert (
-        f"Gemini attempt {llm.ATTEMPTS}/{llm.ATTEMPTS} without the knowledge base"
+        f"Gemini attempt {llm.REPLY_ATTEMPTS}/{llm.REPLY_ATTEMPTS} without the knowledge base"
         in caplog.text
     )
 

@@ -9,8 +9,12 @@ from google import genai
 from google.genai import errors, types
 
 from app.ai_core.instructions import (
+    ATTACHMENT_DESCRIPTIONS_END,
+    ATTACHMENT_DESCRIPTIONS_START,
     ATTACHMENT_END,
     ATTACHMENT_START,
+    DESCRIBE_INSTRUCTION,
+    DESCRIBE_TASK,
     EMAIL_END,
     EMAIL_START,
     NOT_PROCESSED_NOTE,
@@ -24,12 +28,17 @@ from app.mail_processing.attachments import ACCEPTED, REJECTED, Attachment
 log = logging.getLogger(__name__)
 
 TIMEOUT_MS = 60_000
-ATTEMPTS = 3
+# Attempts per Gemini call: the reply (with the knowledge base) and the attachment
+# description before it.
+REPLY_ATTEMPTS = 3
+DESCRIBE_ATTEMPTS = 3
 BACKOFF_SECONDS = 2.0
 
 # Anything that looks like one of our block markers, e.g. "=== ATTACHMENT 2 END ===".
 MARKER_PATTERN = re.compile(r"===\s*(?:EMAIL|ATTACHMENT)\b[^=\n]*===", re.IGNORECASE)
 TEXT_ATTACHMENT_MAX_CHARS = 50_000
+# Reason shown for file attachments when describing them failed.
+DESCRIPTION_FAILED = "could not be read"
 
 URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 
@@ -50,16 +59,19 @@ def make_client(settings: Settings) -> genai.Client:
 
 
 def strip_markers(text: str) -> str:
-    """Removes block markers, so customer text cannot close or fake a block."""
+    """Removes block markers, so sender text cannot close or fake a block."""
     return MARKER_PATTERN.sub("", text).strip()
 
 
 def build_prompt(
-    subject: str, body: str, attachments: Sequence[Attachment] = ()
+    subject: str,
+    body: str,
+    attachments: Sequence[Attachment] = (),
+    descriptions: str = "",
 ) -> str:
-    """The text part of the request. Accepted text attachments are included here;
-    other accepted ones are listed and sent as separate file parts, in the same
-    order; rejected ones are listed as not processed."""
+    """The whole request as text: the email, text attachments in ATTACHMENT blocks,
+    and the descriptions of the other accepted files (from describe_attachments);
+    rejected attachments are listed as not processed."""
     accepted = [item for item in attachments if item.state == ACCEPTED]
     not_processed = [item for item in attachments if item.state == REJECTED]
     lines = [f"Subject: {strip_markers(subject)}", "", strip_markers(body)]
@@ -67,7 +79,7 @@ def build_prompt(
     # File names come from the sender, so they stay inside the EMAIL block.
     if attachments:
         lines += ["", "Attachments:"]
-        file_part = 0
+        file_number = 0
         for item in accepted:
             name = f"- {_file_name(item.filename)} ({item.mime_type})"
             if item.mime_type == "text/plain":
@@ -75,8 +87,8 @@ def build_prompt(
                 lines.append(f"{name}: in ATTACHMENT {number} below")
                 text_blocks.append(_text_block(number, item.data))
             else:
-                file_part += 1
-                lines.append(f"{name}: file part {file_part}")
+                file_number += 1
+                lines.append(f"{name}: file {file_number}, described below")
         for item in not_processed:
             lines.append(
                 f"- {_file_name(item.filename)}: not processed ({item.reason})"
@@ -87,6 +99,11 @@ def build_prompt(
         f"{EMAIL_START}\n" + "\n".join(lines) + f"\n{EMAIL_END}",
         *text_blocks,
     ]
+    if descriptions:
+        parts.append(
+            f"{ATTACHMENT_DESCRIPTIONS_START}\n{strip_markers(descriptions)}\n"
+            f"{ATTACHMENT_DESCRIPTIONS_END}"
+        )
     if not_processed:
         parts.append(NOT_PROCESSED_NOTE)
     return "\n\n".join(parts)
@@ -131,41 +148,102 @@ def generate_reply(
     rag_tool: types.Tool | None = None,
     rag_debug: bool = False,
 ) -> str:
-    """Returns Gemini's reply. Raises the last error when all ATTEMPTS fail.
+    """Returns Gemini's reply. Raises the last error when all REPLY_ATTEMPTS fail.
 
-    Everything goes into one request: the prompt (with text attachments), then
-    the other accepted attachments as inline file parts. With rag_tool, Gemini
-    retrieves from the knowledge base itself; the last attempt goes without it
-    (with a warning), so a broken knowledge base does not block the reply.
+    The knowledge base tool only works with text-only requests, so file
+    attachments (documents, images, audio) are first described as text by a
+    separate call; the reply is then one text request with the tool. If the
+    description fails, the files are listed as not processed.
     """
-    prompt = build_prompt(subject, body, attachments)
     files = [
         item
         for item in attachments
         if item.state == ACCEPTED and item.mime_type != "text/plain"
     ]
+    descriptions = ""
+    if files:
+        try:
+            descriptions = describe_attachments(client, model, subject, body, files)
+        except Exception as exc:
+            log.warning(
+                "Describing %d attachment(s) failed: %s", len(files), type(exc).__name__
+            )
+            attachments = [
+                (
+                    Attachment(item.filename, state=REJECTED, reason=DESCRIPTION_FAILED)
+                    if item in files
+                    else item
+                )
+                for item in attachments
+            ]
+
+    prompt = build_prompt(subject, body, attachments, descriptions)
+    response, tool = _generate(
+        client,
+        model,
+        [types.Part.from_text(text=prompt)],
+        SYSTEM_INSTRUCTION,
+        rag_tool,
+        REPLY_ATTEMPTS,
+    )
+    if tool:
+        log_grounding(response, rag_debug)
+    # The prompt holds all sender text (email, text attachments, descriptions).
+    return remove_email_urls(response.text.strip(), prompt)
+
+
+def describe_attachments(
+    client: Any, model: str, subject: str, body: str, files: Sequence[Attachment]
+) -> str:
+    """Step 1 for emails with file attachments: Gemini describes them as text (with
+    DESCRIBE_INSTRUCTION), without the knowledge base tool. It also gets the email,
+    so it describes precisely what the sender asks about the files."""
+    listing = "\n".join(
+        f"File {number}: {_file_name(item.filename)} ({item.mime_type})"
+        for number, item in enumerate(files, start=1)
+    )
+    email = f"Subject: {strip_markers(subject)}\n\n{strip_markers(body)}"
+    prompt = f"{DESCRIBE_TASK}\n{listing}\n\n{EMAIL_START}\n{email}\n{EMAIL_END}"
     contents = [types.Part.from_text(text=prompt)] + [
         types.Part.from_bytes(data=item.data, mime_type=item.mime_type)
         for item in files
     ]
-    for attempt in range(1, ATTEMPTS + 1):
-        last = attempt == ATTEMPTS
+    response, _ = _generate(
+        client, model, contents, DESCRIBE_INSTRUCTION, None, DESCRIBE_ATTEMPTS
+    )
+    log.info("Described %d attachment(s)", len(files))
+    return response.text.strip()
+
+
+def _generate(
+    client: Any,
+    model: str,
+    contents: list,
+    instruction: str,
+    rag_tool: types.Tool | None,
+    attempts: int,
+) -> tuple[Any, types.Tool | None]:
+    """Calls Gemini up to `attempts` times; returns the response and the tool it
+    used. With rag_tool, the last attempt goes without it (with a warning), so a
+    broken knowledge base does not block the reply."""
+    for attempt in range(1, attempts + 1):
+        last = attempt == attempts
         tool = None if last else rag_tool
         if last and rag_tool:
             log.warning(
                 "Gemini attempt %d/%d without the knowledge base (RAG tool)",
                 attempt,
-                ATTEMPTS,
+                attempts,
             )
         started = time.monotonic()
         try:
-            response = _call(client, model, contents, tool)
+            response = _call(client, model, contents, instruction, tool)
             break
         except Exception as exc:
             log.warning(
                 "Gemini attempt %d/%d failed after %.1f s: %s",
                 attempt,
-                ATTEMPTS,
+                attempts,
                 time.monotonic() - started,
                 type(exc).__name__,
             )
@@ -177,27 +255,28 @@ def generate_reply(
                 time.sleep(BACKOFF_SECONDS * attempt)
 
     log.info(
-        "Gemini answered in %.1f s (model=%s, attempt %d, %d attachment(s), "
-        "knowledge base %s)",
+        "Gemini answered in %.1f s (model=%s, attempt %d, knowledge base %s)",
         time.monotonic() - started,
         model,
         attempt,
-        sum(item.state == ACCEPTED for item in attachments),
         "on" if tool else "off",
     )
-    if tool:
-        log_grounding(response, rag_debug)
-    # The prompt holds all customer text (subject, body, text attachments).
-    return remove_email_urls(response.text.strip(), prompt)
+    return response, tool
 
 
-def _call(client: Any, model: str, contents: list, tool: types.Tool | None) -> Any:
+def _call(
+    client: Any,
+    model: str,
+    contents: list,
+    instruction: str,
+    tool: types.Tool | None,
+) -> Any:
     """One Gemini request, with the knowledge base tool when given."""
     response = client.models.generate_content(
         model=model,
         contents=contents,
         config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION, tools=[tool] if tool else None
+            system_instruction=instruction, tools=[tool] if tool else None
         ),
     )
     if not response.text:

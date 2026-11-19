@@ -124,7 +124,7 @@ def test_gemini_failure_sends_the_fallback_reply_and_sets_failed(
 
     assert mailbox.check_inbox("101").results == {"m1": FAILED}
 
-    assert mailbox.gemini.models.generate_content.call_count == llm.ATTEMPTS
+    assert mailbox.gemini.models.generate_content.call_count == llm.REPLY_ATTEMPTS
     sent = message_from_bytes(
         base64.urlsafe_b64decode(gmail.sent[0]["raw"]), policy=policy.default
     )

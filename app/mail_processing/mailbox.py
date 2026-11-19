@@ -222,7 +222,7 @@ class Mailbox:
                 COMPLETED,
             )
 
-        # The customer got a reply either way; if this fails, nothing is resent.
+        # The sender got a reply either way; if this fails, nothing is resent.
         try:
             self.gmail.mark_read(email.id)
             log.info("Original message %s marked as read", email.id)
