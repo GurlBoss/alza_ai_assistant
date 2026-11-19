@@ -1,12 +1,28 @@
 # token-refresh/get_token.py - standalone, not part of the app.
-# pip install -r requirements.txt
 #
 # Issues a new Gmail refresh token and stores the OAuth credentials in Secret Manager
 # as three secrets (see SECRETS). Re-run whenever the token expires (every 7 days
 # while the OAuth consent screen is in Testing mode).
 #
-# Needs local Google credentials allowed to manage secrets:
-#   gcloud auth application-default login
+# How to run (from the token-refresh/ folder):
+#   1. One time: install the dependencies.
+#        python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#   2. One time: put the OAuth client JSON (downloaded from the OAuth client in the
+#      console) at secrets/client_secret.json, and set GOOGLE_CLOUD_PROJECT in .env
+#      (see .env.example).
+#   3. Log in to Google Cloud, so the script can write the secrets:
+#        gcloud auth application-default login
+#   4. Run the script; port 8080 must be free for the sign-in redirect:
+#        .venv/bin/python get_token.py
+#      In the browser, sign in as the bot's Gmail account and allow access ("Google
+#      hasn't verified this app" -> Continue).
+#   5. Run the gcloud run services update command the script prints at the end, so
+#      Cloud Run starts a new revision with the new token.
+#   6. For local runs (scripts/run_once.py), copy the new values into the root .env
+#      too (see the README, "Test locally").
+#
+# "No refresh token returned": remove the app's access in the bot's Google account
+# (Security -> Third-party connections) and run it again.
 import json
 import os
 import time
