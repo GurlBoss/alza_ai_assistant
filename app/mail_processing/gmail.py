@@ -1,6 +1,7 @@
 """Thin wrapper around the Gmail API and parsing of Gmail messages."""
 
 import base64
+import html
 import logging
 import re
 from dataclasses import dataclass, field
@@ -18,6 +19,14 @@ log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+# For HTML-only emails: blocks whose content is not text, tags that end a line,
+# and any other tag.
+HTML_HIDDEN_BLOCK = re.compile(
+    r"<(style|script|head|title)\b.*?</\1\s*>|<!--.*?-->", re.I | re.S
+)
+HTML_LINE_BREAK = re.compile(r"<br\s*/?>|</(?:p|div|li|tr|h[1-6])\s*>", re.I)
+HTML_TAG = re.compile(r"<[^>]+>")
 
 
 @dataclass
@@ -234,19 +243,29 @@ def _collect_attachments(part: dict[str, Any]) -> list[AttachmentRef]:
 
 def _referenced_cids(payload: dict[str, Any]) -> set[str]:
     """Content-IDs that the HTML body shows as images (cid:...), lower-case."""
-    html = _find_part(payload, "text/html") or ""
-    return {cid.lower() for cid in re.findall(r"cid:([^\"'>\s)]+)", html, re.I)}
+    markup = _find_part(payload, "text/html") or ""
+    return {cid.lower() for cid in re.findall(r"cid:([^\"'>\s)]+)", markup, re.I)}
 
 
 def _extract_body(payload: dict[str, Any]) -> str:
-    """Returns the text/plain part, or text/html with tags stripped as a fallback."""
+    """Returns the text/plain part, or the text of the text/html part as a fallback."""
     plain = _find_part(payload, "text/plain")
+    markup = _find_part(payload, "text/html")
+    body = ""
     if plain is not None:
-        return plain
-    html = _find_part(payload, "text/html")
-    if html is not None:
-        return re.sub(r"<[^>]+>", " ", html)
-    return ""
+        body = plain
+    elif markup is not None:
+        body = html_to_text(markup)
+    return body
+
+
+def html_to_text(markup: str) -> str:
+    """The visible text of an HTML body: no styles, scripts or comments, entities
+    such as &nbsp; decoded, one line per paragraph."""
+    text = HTML_HIDDEN_BLOCK.sub(" ", markup)
+    text = HTML_TAG.sub(" ", HTML_LINE_BREAK.sub("\n", text))
+    lines = (" ".join(line.split()) for line in html.unescape(text).splitlines())
+    return "\n".join(line for line in lines if line)
 
 
 def _find_part(part: dict[str, Any], mime_type: str) -> str | None:

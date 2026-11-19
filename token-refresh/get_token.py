@@ -110,7 +110,7 @@ def main() -> None:
 
     # Cloud Run resolves ":latest" only when an instance starts; changing an env var
     # forces a new revision so the service picks up the new token.
-    # --update-secrets keeps the service's other secrets (e.g. GEMINI_API_KEY).
+    # --update-secrets keeps the service's other env vars and secrets.
     mapping = ",".join(f"{env}={sid}:latest" for env, sid in SECRETS.items())
     print("\nRoll out a new Cloud Run revision so the service picks it up:")
     print(

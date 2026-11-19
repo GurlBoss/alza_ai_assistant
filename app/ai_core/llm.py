@@ -224,8 +224,9 @@ def _generate(
     attempts: int,
 ) -> tuple[Any, types.Tool | None]:
     """Calls Gemini up to `attempts` times; returns the response and the tool it
-    used. With rag_tool, the last attempt goes without it (with a warning), so a
-    broken knowledge base does not block the reply."""
+    used. With rag_tool, the last attempt goes without it (with a warning), and so
+    does every attempt after a bad request (4xx), so a broken knowledge base does
+    not block the reply."""
     for attempt in range(1, attempts + 1):
         last = attempt == attempts
         tool = None if last else rag_tool
@@ -247,12 +248,15 @@ def _generate(
                 time.monotonic() - started,
                 type(exc).__name__,
             )
-            # A bad request without the tool would fail again; with the tool, the
-            # attempts without it may still work.
+            # A bad request without the tool would fail again; with the tool, it may
+            # be the tool's fault, so the next attempts go without it.
             if last or (tool is None and not _is_retryable(exc)):
                 raise
             if _is_retryable(exc):
                 time.sleep(BACKOFF_SECONDS * attempt)
+            elif tool:
+                log.warning("Bad request with the knowledge base, retrying without it")
+                rag_tool = None
 
     log.info(
         "Gemini answered in %.1f s (model=%s, attempt %d, knowledge base %s)",
