@@ -24,6 +24,7 @@ from app.ai_core.instructions import (
 from app.ai_core.rag import log_grounding
 from app.config import Settings
 from app.mail_processing.attachments import ACCEPTED, REJECTED, Attachment
+from app.mail_processing.filters import TEXT
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def build_prompt(
         file_number = 0
         for item in accepted:
             name = f"- {_file_name(item.filename)} ({item.mime_type})"
-            if item.mime_type == "text/plain":
+            if item.mime_type == TEXT:
                 number = len(text_blocks) + 1
                 lines.append(f"{name}: in ATTACHMENT {number} below")
                 text_blocks.append(_text_block(number, item.data))
@@ -158,7 +159,7 @@ def generate_reply(
     files = [
         item
         for item in attachments
-        if item.state == ACCEPTED and item.mime_type != "text/plain"
+        if item.state == ACCEPTED and item.mime_type != TEXT
     ]
     descriptions = ""
     if files:

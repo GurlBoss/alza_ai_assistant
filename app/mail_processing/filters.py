@@ -62,9 +62,32 @@ def thread_limit_reached(gmail: GmailClient, email: Email) -> bool:
 
 # --- attachments ------------------------------------------------------------------
 
-# Supported: images (JPEG, PNG, WebP), audio (MP3, M4A, WAV), PDF and plain text.
+# Supported types: images (JPEG, PNG, WebP), audio (MP3, M4A, WAV), PDF and plain
+# text.
+PDF = "application/pdf"
+JPEG = "image/jpeg"
+PNG = "image/png"
+WEBP = "image/webp"
+WAV = "audio/wav"
+M4A = "audio/mp4"
+MP3 = "audio/mpeg"
+TEXT = "text/plain"
+
+# How each type starts (magic bytes). RIFF files (WebP, WAV) name their format at
+# bytes 8-12, MP4 files have "ftyp" at bytes 4-8 and their brand at bytes 8-12.
+PDF_MAGIC = b"%PDF-"
+JPEG_MAGIC = b"\xff\xd8\xff"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+RIFF_MAGIC = b"RIFF"
+WEBP_FORMAT = b"WEBP"
+WAV_FORMAT = b"WAVE"
+MP4_MAGIC = b"ftyp"
+MP3_ID3_MAGIC = b"ID3"
 # MP4 container brands that mean M4A audio; any other brand (video) is unsupported.
 M4A_BRANDS = {b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"F4B "}
+# Text attachments must have no NUL byte in this many first bytes (binary check).
+TEXT_CHECK_BYTES = 4096
+
 # Larger images are always treated as real pictures (photos, pasted screenshots).
 SIGNATURE_IMAGE_MAX_BYTES = 30 * 1024
 
@@ -72,6 +95,9 @@ SIGNATURE_IMAGE_MAX_BYTES = 30 * 1024
 UNSUPPORTED = "unsupported file type"
 TOO_LARGE = "file is too large"
 TOTAL_TOO_LARGE = "attachments together are too large"
+DOWNLOAD_FAILED = "could not be downloaded"
+# Left out without a mention in the reply (logged only).
+SIGNATURE_IMAGE = "signature image"
 
 
 def filter_type(data: bytes, declared: str = "") -> str | None:
@@ -82,22 +108,22 @@ def filter_type(data: bytes, declared: str = "") -> str | None:
     never makes binary data acceptable.
     """
     mime_type = None
-    if data.startswith(b"%PDF-"):
-        mime_type = "application/pdf"
-    elif data.startswith(b"\xff\xd8\xff"):
-        mime_type = "image/jpeg"
-    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
-        mime_type = "image/png"
-    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        mime_type = "image/webp"
-    elif data[:4] == b"RIFF" and data[8:12] == b"WAVE":
-        mime_type = "audio/wav"
-    elif data[4:8] == b"ftyp" and data[8:12] in M4A_BRANDS:
-        mime_type = "audio/mp4"
-    elif data.startswith(b"ID3") or _is_mpeg_audio_frame(data):
-        mime_type = "audio/mpeg"
-    elif declared.startswith("text/plain") and b"\x00" not in data[:4096]:
-        mime_type = "text/plain"
+    if data.startswith(PDF_MAGIC):
+        mime_type = PDF
+    elif data.startswith(JPEG_MAGIC):
+        mime_type = JPEG
+    elif data.startswith(PNG_MAGIC):
+        mime_type = PNG
+    elif data[:4] == RIFF_MAGIC and data[8:12] == WEBP_FORMAT:
+        mime_type = WEBP
+    elif data[:4] == RIFF_MAGIC and data[8:12] == WAV_FORMAT:
+        mime_type = WAV
+    elif data[4:8] == MP4_MAGIC and data[8:12] in M4A_BRANDS:
+        mime_type = M4A
+    elif data.startswith(MP3_ID3_MAGIC) or _is_mpeg_audio_frame(data):
+        mime_type = MP3
+    elif declared.startswith(TEXT) and b"\x00" not in data[:TEXT_CHECK_BYTES]:
+        mime_type = TEXT
     return mime_type
 
 

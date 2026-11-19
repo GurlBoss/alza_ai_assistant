@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 from app.config import Settings
 from app.mail_processing.filters import (
+    DOWNLOAD_FAILED,
+    SIGNATURE_IMAGE,
     content_rejection,
     filter_type,
     is_signature_image,
@@ -19,8 +21,6 @@ log = logging.getLogger(__name__)
 # Attachment states.
 ACCEPTED = "ACCEPTED"  # sent to Gemini
 REJECTED = "REJECTED"  # not used; the reply mentions it with the reason
-
-DOWNLOAD_FAILED = "could not be downloaded"
 
 
 @dataclass
@@ -51,7 +51,7 @@ def load_attachments(
     numbered = enumerate(email.attachments, start=1)
     for number, ref in sorted(numbered, key=lambda pair: pair[1].size):
         if is_signature_image(ref, email.referenced_cids):
-            _log(email, number, ref, "skipped (signature image)")
+            _log(email, number, ref, f"skipped ({SIGNATURE_IMAGE})")
         else:
             accepted = [item for item in loaded.values() if item.state == ACCEPTED]
             room = max_total - sum(len(item.data) for item in accepted)
