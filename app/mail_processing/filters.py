@@ -74,7 +74,7 @@ MP3 = "audio/mpeg"
 TEXT = "text/plain"
 
 # How each type starts (magic bytes). RIFF files (WebP, WAV) name their format at
-# bytes 8-12, MP4 files have "ftyp" at bytes 4-8 and their brand at bytes 8-12.
+# bytes 8-12, MP4 files have "ftyp" at bytes 4-8.
 PDF_MAGIC = b"%PDF-"
 JPEG_MAGIC = b"\xff\xd8\xff"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -83,8 +83,12 @@ WEBP_FORMAT = b"WEBP"
 WAV_FORMAT = b"WAVE"
 MP4_MAGIC = b"ftyp"
 MP3_ID3_MAGIC = b"ID3"
-# MP4 container brands that mean M4A audio; any other brand (video) is unsupported.
-M4A_BRANDS = {b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"F4B "}
+# An MP4 file is M4A audio when it has an audio track and no video track. The brand
+# does not tell: recorders write "M4A ", "3gp4", "isom", "mp42" and others.
+MP4_CONTAINER_BOXES = {b"moov", b"trak", b"mdia"}
+MP4_HANDLER_BOX = b"hdlr"
+AUDIO_TRACK = b"soun"
+VIDEO_TRACK = b"vide"
 # Text attachments must have no NUL byte in this many first bytes (binary check).
 TEXT_CHECK_BYTES = 4096
 
@@ -118,13 +122,43 @@ def filter_type(data: bytes, declared: str = "") -> str | None:
         mime_type = WEBP
     elif data[:4] == RIFF_MAGIC and data[8:12] == WAV_FORMAT:
         mime_type = WAV
-    elif data[4:8] == MP4_MAGIC and data[8:12] in M4A_BRANDS:
+    elif data[4:8] == MP4_MAGIC and _is_audio_only(_mp4_track_types(data)):
         mime_type = M4A
     elif data.startswith(MP3_ID3_MAGIC) or _is_mpeg_audio_frame(data):
         mime_type = MP3
     elif declared.startswith(TEXT) and b"\x00" not in data[:TEXT_CHECK_BYTES]:
         mime_type = TEXT
     return mime_type
+
+
+def _mp4_track_types(data: bytes, start: int = 0, end: int | None = None) -> set[bytes]:
+    """Handler types of the tracks in an MP4 file (b"soun" audio, b"vide" video),
+    from the hdlr boxes in moov/trak/mdia."""
+    end = len(data) if end is None else end
+    types: set[bytes] = set()
+    pos = start
+    while pos + 8 <= end:
+        size = int.from_bytes(data[pos : pos + 4], "big")
+        kind = data[pos + 4 : pos + 8]
+        header = 8
+        if size == 1:  # 64-bit size follows the type
+            size = int.from_bytes(data[pos + 8 : pos + 16], "big")
+            header = 16
+        elif size == 0:  # box runs to the end
+            size = end - pos
+        if size < header:
+            break
+        if kind in MP4_CONTAINER_BOXES:
+            types |= _mp4_track_types(data, pos + header, min(pos + size, end))
+        elif kind == MP4_HANDLER_BOX:
+            # version + flags (4 bytes) and pre_defined (4 bytes), then the type.
+            types.add(data[pos + header + 8 : pos + header + 12])
+        pos += size
+    return types
+
+
+def _is_audio_only(track_types: set[bytes]) -> bool:
+    return AUDIO_TRACK in track_types and VIDEO_TRACK not in track_types
 
 
 def _is_mpeg_audio_frame(data: bytes) -> bool:

@@ -55,6 +55,27 @@ def text(characters: int = 40) -> bytes:
 
 
 WEBP = b"RIFF\x24\x00\x00\x00WEBPVP8 \x18\x00\x00\x00" + b"\x00" * 24
-M4A = b"\x00\x00\x00\x20ftypM4A \x00\x00\x00\x00M4A mp42isom" + b"\x00" * 32
-MP4_VIDEO = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41" + b"\x00" * 32
+
+
+def box(kind: bytes, payload: bytes) -> bytes:
+    """An MP4 box: 4-byte size, 4-byte type, payload."""
+    return (8 + len(payload)).to_bytes(4, "big") + kind + payload
+
+
+def mp4(brand: bytes, *handlers: bytes) -> bytes:
+    """A minimal MP4: ftyp, mdat, then moov with one track per handler type."""
+    tracks = b"".join(
+        box(b"trak", box(b"mdia", box(b"hdlr", b"\x00" * 8 + handler + b"\x00" * 12)))
+        for handler in handlers
+    )
+    return (
+        box(b"ftyp", brand + b"\x00\x00\x00\x00isom")
+        + box(b"mdat", b"\x00" * 32)
+        + box(b"moov", tracks)
+    )
+
+
+M4A = mp4(b"M4A ", b"soun")
+M4A_3GP = mp4(b"3gp4", b"soun")  # Android voice recorder
+MP4_VIDEO = mp4(b"isom", b"vide", b"soun")
 OGG_OPUS = b"OggS\x00\x02" + b"\x00" * 20 + b"\x01\x13OpusHead\x01\x01" + b"\x00" * 16

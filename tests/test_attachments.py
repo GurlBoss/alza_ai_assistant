@@ -64,9 +64,10 @@ def test_filter_type() -> None:
         (samples.MP3_ID3, "audio/mpeg"),
         (samples.MP3_FRAME, "audio/mpeg"),
         (samples.M4A, "audio/mp4"),
+        (samples.M4A_3GP, "audio/mp4"),
         (samples.office("word"), None),  # DOCX
         (samples.OGG_OPUS, None),
-        (samples.MP4_VIDEO, None),  # MP4 container, but a video brand
+        (samples.MP4_VIDEO, None),  # MP4 with a video track
         (samples.EXE, None),
         (b"", None),
     ]
